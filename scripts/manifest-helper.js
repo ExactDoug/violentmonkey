@@ -1,6 +1,6 @@
 const fs = require('fs').promises;
 const yaml = require('js-yaml');
-const { getVersion, isBeta } = require('./version-helper');
+const { getVersion } = require('./version-helper');
 
 async function readManifest() {
   const input = await fs.readFile('src/manifest.yml', 'utf8');
@@ -13,12 +13,6 @@ async function buildManifest(base) {
   data.version = getVersion();
   if (process.env.TARGET === 'selfHosted') {
     data.browser_specific_settings.gecko.update_url = 'https://raw.githubusercontent.com/violentmonkey/violentmonkey/updates/updates.json';
-  }
-  if (isBeta()) {
-    // Do not support i18n in beta version
-    const name = 'Exact Scripts BETA';
-    data.name = name;
-    data.browser_action.default_title = name;
   }
   return data;
 }
