@@ -1,0 +1,18 @@
+# Normalize line endings on commit; check out LF everywhere.
+# Without this, a checkout on a Windows-configured client rewrote every tracked
+# text file to CRLF and produced a 221-file, 60k-line phantom diff that made the
+# working tree unreviewable. See doc/SYNCING-UPSTREAM.md.
+* text=auto eol=lf
+
+# Binary assets: never touch, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# Lockfiles are generated; keep them out of diffs and merges.
+pnpm-lock.yaml -diff linguist-generated

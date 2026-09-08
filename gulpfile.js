@@ -10,6 +10,7 @@ const { getVersion, isBeta } = require('./scripts/version-helper');
 const { buildManifest } = require('./scripts/manifest-helper');
 const pkg = require('./package.json');
 const { MV3, DIST } = require('./scripts/common');
+const { rebrand } = require('./scripts/brand'); // fork: branding overlay
 
 const paths = {
   manifest: 'src/manifest.yml',
@@ -27,7 +28,7 @@ function clean() {
 
 function watch() {
   gulp.watch(paths.manifest, manifest);
-  gulp.watch(paths.locales.concat(paths.templates), copyI18n);
+  gulp.watch(paths.locales.concat(paths.templates), gulp.series(copyI18n, rebrand));
 }
 
 async function jsDev() {
@@ -166,8 +167,8 @@ const pack = gulp.parallel(createIcons, copyI18n, ...MV3 ? [manifest] : []);
 
 exports.clean = clean;
 exports.manifest = manifest;
-exports.dev = gulp.parallel(gulp.series(pack, watch), jsDev);
-exports.build = gulp.series(clean, gulp.parallel(pack, jsProd));
+exports.dev = gulp.parallel(gulp.series(pack, rebrand, watch), jsDev);
+exports.build = gulp.series(clean, gulp.parallel(pack, jsProd), rebrand);
 exports.i18n = updateI18n;
 exports.check = checkI18n;
 exports.copyI18n = copyI18n;
