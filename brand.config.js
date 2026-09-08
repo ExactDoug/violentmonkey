@@ -15,6 +15,18 @@ module.exports = {
   name: 'Exact Scripts',
 
   /**
+   * Square monogram used for every generated icon below 128px.
+   *
+   * The Exact artwork is a horizontal wordmark plus a tagline. Rasterized to a
+   * 16px toolbar icon it is an illegible smudge, and it wastes ~60% of a square
+   * canvas as empty margin at every size. This is the red checkmark from the
+   * logo, extracted and squared, which stays crisp down to 16px.
+   *
+   * Set to null to render all sizes from the wordmark (upstream behaviour).
+   */
+  iconSmall: 'src/resources/icon-small.png',
+
+  /**
    * Replace `homepage_url` in the built manifest.
    * Left null deliberately: upstream's homepage is the real documentation for
    * this engine, and pointing it at a nonexistent Exact URL would ship a dead

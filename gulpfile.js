@@ -11,6 +11,7 @@ const { buildManifest } = require('./scripts/manifest-helper');
 const pkg = require('./package.json');
 const { MV3, DIST } = require('./scripts/common');
 const { rebrand } = require('./scripts/brand'); // fork: branding overlay
+const brand = require('./brand.config');
 
 const paths = {
   manifest: 'src/manifest.yml',
@@ -65,19 +66,23 @@ async function createIcons() {
   const dist = `${DIST}/public/images`;
   await fs.mkdir(dist, { recursive: true });
   const icon = Sharp(`src/resources/icon${isBeta() ? '-beta' : ''}.png`);
-  const gray = icon.clone().grayscale();
-  const transparent = icon.clone().composite([{
-    input: Buffer.from([255, 255, 255, 256 * ALPHA]),
-    raw: { width: 1, height: 1, channels: 4 },
-    tile: true,
-    blend: 'dest-in',
-  }]);
-  const types = [
-    ['', icon],
-    ['b', gray],
-    ['w', transparent],
+  /* fork: the brand artwork is a horizontal wordmark, which is an unreadable
+   * smudge once rasterized to toolbar sizes. When brand.config.js supplies a
+   * square monogram, render every size below 128 from that instead, and keep
+   * the wordmark only for the 128px store/about listing. See issue #6. */
+  const smallIcon = brand.iconSmall ? Sharp(brand.iconSmall) : icon;
+  const variantsOf = image => [
+    ['', image],
+    ['b', image.clone().grayscale()],
+    ['w', image.clone().composite([{
+      input: Buffer.from([255, 255, 255, 256 * ALPHA]),
+      raw: { width: 1, height: 1, channels: 4 },
+      tile: true,
+      blend: 'dest-in',
+    }])],
   ];
-  const handle = (size, type = '', image = icon) => {
+  const types = variantsOf(smallIcon);
+  const handle = (size, type = '', image = smallIcon) => {
     let res = image.clone().resize({ width: size });
     if (size < 48) res = res.sharpen(size < 32 ? 0.5 : 0.25);
     return res.toFile(`${dist}/icon${size}${type}.png`);
@@ -87,15 +92,21 @@ async function createIcons() {
     blend: 'over',
   }]);
   const handle16 = async ([type, image]) => {
-    const res = image.clone()
-    .resize({ width: 18 })
-    .sharpen(0.5, 0)
-    .extract({ left: 1, top: 2, width: 16, height: 16 });
+    /* The upstream 18px-then-crop trick nudges a canvas-filling glyph into
+     * place; a monogram is already centred with its own margin, so scale it
+     * straight to 16 to avoid clipping a stroke. */
+    const res = brand.iconSmall
+      ? image.clone().resize({ width: 16 }).sharpen(0.5, 0)
+      : image.clone()
+        .resize({ width: 18 })
+        .sharpen(0.5, 0)
+        .extract({ left: 1, top: 2, width: 16, height: 16 });
     return (type === 'w' ? res : await darkenOuterEdge(res))
     .toFile(`${dist}/icon16${type}.png`);
   };
   return Promise.all([
-    handle(128),
+    // 128px keeps the full wordmark: it is the store listing and about-page size
+    handle(128, '', icon),
     ...types.map(handle16),
     // 32px dashboard icon (recycled) + 2xDPI browser_action desktop
     // 38px dashboard icon (normal) + 1.5xDPI browser_action Android
