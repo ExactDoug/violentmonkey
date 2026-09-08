@@ -2,39 +2,45 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Dry run — build and create the GitHub release only, skip external stores'
+        type: boolean
+        default: false
   push:
     tags:
       - v*
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.set-outputs.outputs.prerelease }}
     steps:
-
-      - uses: actions/checkout@v1 # v1 keeps tags
+      - uses: actions/checkout@v6
         with:
-          fetch-depth: 250 # for `action-helper`
-          # persist-credentials: false # not implemented in v1
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
 
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '20'
+      - name: Set job outputs
+        id: set-outputs
+        run: echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare
-        run: yarn && node scripts/action-helper.js
-        env:
-          ACTION_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DISCORD_WEBHOOK_RELEASE: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
+      - name: Test
+        run: pnpm run ci
 
       - name: Build
         env:
           SYNC_DROPBOX_CLIENT_ID: ${{ secrets.SYNC_DROPBOX_CLIENT_ID }}
-          SYNC_GOOGLE_CLIENT_ID: ${{ secrets.SYNC_GOOGLE_CLIENT_ID }}
-          SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.SYNC_GOOGLE_CLIENT_SECRET }}
           SYNC_GOOGLE_DESKTOP_ID: ${{ secrets.SYNC_GOOGLE_DESKTOP_ID }}
           SYNC_GOOGLE_DESKTOP_SECRET: ${{ secrets.SYNC_GOOGLE_DESKTOP_SECRET }}
           SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.SYNC_ONEDRIVE_CLIENT_ID }}
-          SYNC_ONEDRIVE_CLIENT_SECRET: ${{ secrets.SYNC_ONEDRIVE_CLIENT_SECRET }}
         run: |
           mkdir -p $ASSETS_DIR $TEMP_DIR
 
@@ -45,57 +51,248 @@ jobs:
             && zip -u $TEMP_DIR/$SOURCE_ZIP .env && rm .env
 
           # Build for release, also upload to GitHub assets
-          yarn build
-          # Build one more time to make sure the output is the same
-          mv dist $TEMP_DIR/dist && yarn build && diff -qr dist $TEMP_DIR/dist
+          pnpm build
 
+      - name: Zip
+        run: |
           cd dist && zip -r ../$ASSETS_DIR/$ASSET_ZIP . && cd ..
 
-          # Build for CWS beta, append `BETA` to version name
-          # Same as `BETA=1 yarn build` but only manifest is changed by now
-          BETA=1 npx gulp manifest
-          cd dist && zip -r ../$TEMP_DIR/$ASSET_CWS_BETA_ZIP . && cd ..
-
           # Build for AMO unlisted, append `BETA` to version name and set update_url for FF
-          # Same as `yarn build:selfHosted` but only manifest is changed by now
+          # Same as `pnpm build:selfHosted` but only manifest is changed by now
           TARGET=selfHosted BETA=1 npx gulp manifest
           cd dist && zip -r ../$TEMP_DIR/$ASSET_SELF_HOSTED_ZIP . && cd ..
 
+      - name: Build MV3
+        env:
+          SYNC_DROPBOX_CLIENT_ID: ${{ secrets.SYNC_DROPBOX_CLIENT_ID }}
+          SYNC_GOOGLE_DESKTOP_ID: ${{ secrets.SYNC_GOOGLE_DESKTOP_ID }}
+          SYNC_GOOGLE_DESKTOP_SECRET: ${{ secrets.SYNC_GOOGLE_DESKTOP_SECRET }}
+          SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.SYNC_ONEDRIVE_CLIENT_ID }}
+        run: pnpm build:mv3
+
+      - name: Zip MV3
+        run: |
+          cd dist-mv3 && zip -r ../$ASSETS_DIR/$ASSET_CWS_ZIP . && cd ..
+
+          # Build for CWS beta, append `BETA` to version name
+          # Same as `BETA=1 pnpm build` but only manifest is changed by now
+          BETA=1 MV3=1 npx gulp manifest
+          cd dist-mv3 && zip -r ../$TEMP_DIR/$ASSET_CWS_BETA_ZIP . && cd ..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-outputs
+          path: |
+            dist-assets
+            tmp
+            dist
+            dist-mv3
+
+  publish-amo:
+    name: Publish to AMO
+    needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dryRun }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-outputs
+          path: .
+
       - name: Publish to AMO
         continue-on-error: true
-        run: |
-          mkdir -p $TEMP_DIR/updates
-          if [ "$PRERELEASE" != "true" ]; then
-            echo Publish listed version
-            node scripts/amo-upload.mjs
-          else
-            echo Publish unlisted version
-            DEBUG=amo-upload BETA=1 node scripts/amo-upload.mjs
-          fi
         env:
           AMO_KEY: ${{ secrets.AMO_KEY }}
           AMO_SECRET: ${{ secrets.AMO_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Try to publish if not exist
           AMO_PUBLISH: true
+        run: |
+          mkdir -p $TEMP_DIR/updates
+          if [ "$PRERELEASE" = "true" ]; then
+            echo Publish unlisted version
+            export BETA=1
+          else
+            echo Publish listed version
+          fi
+          if ! node scripts/amo-upload.mjs 2>"$TEMP_DIR/stderr.log"; then
+            export ERROR=$(cat "$TEMP_DIR/stderr.log" 2>/dev/null || true)
+            ERROR="${ERROR:-AMO publish failed}"
+            echo "$ERROR"
+          fi
+          export TARGET=AMO
+          node scripts/notify-release.mjs
+
+      - name: Upload AMO asset
+        if: success() || failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node -e 'import("./scripts/release-helper.mjs").then(({ uploadAssets }) => uploadAssets())';
+
+  publish-cws:
+    name: Publish to Chrome Web Store
+    needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dryRun }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-outputs
+          path: .
 
       - name: Publish to CWS
         continue-on-error: true
+        env:
+          EXTENSION_ID_BETA: opokoaglpekkimldnlggpoagmjegichg
+          EXTENSION_ID_RELEASE: jinjaccalgpekkimldnlggpoagmjegichg
+          PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
         run: |
           set -x
           if [ "$PRERELEASE" != "true" ]; then
             echo Publish release
-            npx chrome-webstore-upload-cli@1 upload --extension-id $EXTENSION_ID_RELEASE --source $ASSETS_DIR/$ASSET_ZIP --auto-publish
+            CWS_EXT_ID=$EXTENSION_ID_RELEASE
+            CWS_SOURCE=$ASSETS_DIR/$ASSET_CWS_ZIP
           else
             echo Publish prerelease
-            npx chrome-webstore-upload-cli@1 upload --extension-id $EXTENSION_ID_BETA --source $TEMP_DIR/$ASSET_CWS_BETA_ZIP --auto-publish
+            CWS_EXT_ID=$EXTENSION_ID_BETA
+            CWS_SOURCE=$TEMP_DIR/$ASSET_CWS_BETA_ZIP
           fi
+          if ! npx chrome-webstore-upload-cli@4 --extension-id $CWS_EXT_ID --source $CWS_SOURCE 2>"$TEMP_DIR/stderr.log"; then
+            export ERROR=$(cat "$TEMP_DIR/stderr.log" 2>/dev/null || true)
+            ERROR="${ERROR:-CWS publish failed}"
+            echo "$ERROR"
+
+            # Ignore pending review error: "❌ You may not edit or publish an item that is in review."
+            if [[ "$ERROR" == *"is in review"* ]]; then
+              echo "::warning::PENDING_REVIEW: skipping CWS publish notification"
+              exit 0
+            fi
+          fi
+          export TARGET=CWS
+          node scripts/notify-release.mjs
+
+  publish-edge:
+    name: Publish to Edge
+    needs: build
+    if: ${{ needs.build.outputs.prerelease != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.dryRun) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-outputs
+          path: .
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Publish to Edge
         env:
-          EXTENSION_ID_BETA: opokoaglpekkimldnlggpoagmjegichg
-          EXTENSION_ID_RELEASE: jinjaccalgkegednnccohejagnlnfdag
-          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
-          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
+          EDGE_API_KEY: ${{ secrets.EDGE_API_KEY }}
+          EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID }}
+        run: |
+          if ! deno run -A https://raw.githubusercontent.com/violentmonkey/publish-edge-ext/main/main.ts $ASSETS_DIR/$ASSET_ZIP 2>"$TEMP_DIR/stderr.log"; then
+            export ERROR=$(cat "$TEMP_DIR/stderr.log" 2>/dev/null || true)
+            ERROR="${ERROR:-Edge publish failed}"
+            echo "$ERROR"
+          fi
+          export TARGET=Edge
+          node scripts/notify-release.mjs
+
+  publish-crx:
+    name: Publish CRX (MV2)
+    needs: build
+    if: ${{ needs.build.outputs.prerelease != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.dryRun) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-outputs
+          path: .
+
+      - name: Build MV2 CRX
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          # Rebuild manifest with `update_url` for self-hosted MV2
+          TARGET=selfHosted npx gulp manifest
+          node scripts/crx-helper.mjs
+
+      - name: Upload CRX asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node -e 'import("./scripts/release-helper.mjs").then(({ uploadAssets }) => uploadAssets())';
+
+      - name: Update CRX manifest on updates branch
+        uses: JamesIves/github-pages-deploy-action@4.1.0
+        with:
+          branch: updates
+          folder: ${{ env.TEMP_DIR }}/updates
+          clean: false
+          commit-message: Update CRX manifest to ${{ env.VERSION }} 🚀
+
+  release:
+    name: Create/Update GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-outputs
+          path: .
 
       - name: Create/Update Release
         env:

@@ -12,21 +12,23 @@ $logoMLR: calc(($leftPaneWidth - $logoSize) / 2);
 $topIconSize: 20px;
 $findIconSize: 16px;
 $findIconML: calc($leftPaneWidth - $findIconSize - $iconMR);
-$footerHeight: 40px;
 
 $hoverColor: var(--bg);
 $hoverBack: cornflowerblue;
 $hoverButtonInactiveBack: #a0c1fd;
-$DARKhoverColor: var(--fill-15);
-$DARKhoverBack: #404c5c;
-$DARKhoverButtonInactiveBack: #5b6979;
 
 html {
   scrollbar-width: none; /* Vivaldi: preventing the full-body scrollbar before size-adjustment kicks in */
+  @media (prefers-color-scheme: dark) {
+    --failure-bg: hsla(20, 100%, 50%, .5);
+    --menu-hover-bg: #404c5c;
+    --menu-hover-color: var(--fill-15);
+    --menu-group-color: #eee;
+    --button-hover-inactive-bg: #5b6979;
+  }
 }
 body {
   width: 320px;
-  max-width: 100%;
   /* Latest Chrome renders an extra blank for a nonexistent scrollbar */
   overflow: hidden;
   background: var(--fill-0-5);
@@ -51,13 +53,21 @@ a {
 }
 
 footer {
-  height: $footerHeight;
-  line-height: $footerHeight;
+  min-height: 40px;
+  max-height: 60px;
+  padding: 4px $padding;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   font-size: $fontSize;
-  color: var(--fill-6);
+  word-wrap: break-word;
+  white-space: pre-wrap !important;
+  z-index: 1000;
+  a[href]:not(:hover) {
+    color: var(--fill-5);
+  }
   a:not([href]) {
-    color: var(--fg);
     font-weight: bold;
   }
 }
@@ -77,12 +87,8 @@ footer {
   cursor: pointer;
   &:hover,
   &:focus {
-    background: $hoverBack;
-    color: $hoverColor;
-    @media (prefers-color-scheme: dark) {
-      background: $DARKhoverBack;
-      color: $DARKhoverColor;
-    }
+    background: var(--menu-hover-bg, $hoverBack);
+    color: var(--menu-hover-color, $hoverColor);
   }
   .script:not(.disabled):not(.runs) & .script-name,
   .disabled:not(.runs) > & {
@@ -209,10 +215,7 @@ footer {
   }
   &-group {
     padding-left: $findIconML;
-    color: #4a7792;
-    @media (prefers-color-scheme: dark) {
-      color: #eee;
-    }
+    color: var(--menu-group-color, #4a7792);
     & [data-totals]::after {
       content: ": " attr(data-totals);
     }
@@ -249,55 +252,53 @@ footer {
     position: absolute;
     top: 0;
     right: 0;
+    .script:hover &, /* some browsers like Firefox or Vivaldi 8.1 don't focus the popup */
     .touch & {
       display: flex !important;
     }
   }
   &-button {
     padding: .5rem;
+    line-height: 1;
     background: var(--bg);
     cursor: pointer;
+    &:hover, /* some browsers like Firefox or Vivaldi 8.1 don't focus the popup */
     &:focus {
       color: var(--bg);
       background: $hoverBack;
     }
-    .menu-item:hover + .submenu-buttons &:not(:focus) {
-      background: $hoverButtonInactiveBack;
-      @media (prefers-color-scheme: dark) {
-        background: $DARKhoverButtonInactiveBack;
-      }
+    .menu-item:hover + .submenu-buttons &:not(:focus):not(:hover) {
+      background: var(--button-hover-inactive-bg, $hoverButtonInactiveBack);
     }
     .icon {
       display: block;
     }
   }
   &-commands {
+    $cmdHeight: 1.5rem;
+    $cmdIconPad: 4px;
     font-size: .8rem;
     color: var(--fill-12);
+    padding-left: calc($leftPaneWidth - $cmdIconPad);
+    details:not([open]) ~ * {
+      display: inline-flex;
+      padding-right: 0;
+    }
+    summary {
+      padding-left: $iconML;
+      width: calc($leftPaneWidth - $cmdIconPad);
+      line-height: $cmdHeight;
+    }
     > .menu-item {
-      min-height: 1.5rem;
-      padding-left: $leftPaneWidth;
+      min-height: $cmdHeight;
+      line-height: $cmdHeight;
+      display: block; /* enables ellipsis overflow */
       > .icon {
-        margin-right: .5rem;
+        margin: 0 $cmdIconPad;
+        vertical-align: text-top;
       }
     }
   }
-}
-
-.message {
-  position: absolute;
-  max-width: 100%;
-  left: 0;
-  bottom: 0;
-  padding: 4px $padding;
-  word-wrap: break-word;
-  font-size: $fontSize;
-  line-height: 1.2; /* lower values cut descender in "g" */
-  background: var(--fill-0-5);
-  border: 1px solid var(--fill-2);
-  max-height: $footerHeight;
-  overflow: hidden;
-  white-space: pre-wrap;
 }
 
 .failure-reason {
@@ -315,7 +316,7 @@ footer {
 .page-popup:not(.noninjectable):not(.blacklisted) {
   .failure-reason {
     // Making the warning noticeable
-    background: hsla(30, 100%, 50%, .2);
+    background: var(--failure-bg, hsla(30, 100%, 50%, .2));
   }
   .settings {
     background: none;
@@ -346,6 +347,10 @@ footer {
       color: var(--bg);
       background: cornflowerblue;
     }
+  }
+  > code {
+    padding: .5rem 1rem;
+    border-bottom: 1px solid var(--fill-3);
   }
 }
 

@@ -1,12 +1,17 @@
 import { i18n, ignoreChromeErrors, makeDataUri, noop } from '@/common';
+import { registerInjector } from '@/common/browser-scripts-api';
 import { BLACKLIST } from '@/common/consts';
-import { nest, objectPick } from '@/common/object';
+import loadIconData from '@/common/load-icon-data';
 import { addOwnCommands, commands, init } from './init';
+import { installedOver } from './on-installed';
 import { getOption, hookOptions, setOption } from './options';
 import { popupTabs } from './popup-tracker';
+import { isTopFrame } from './preinject-core';
+import sessionData, { badges, flushSession, kBadges } from './session-data';
 import storage, { S_CACHE } from './storage';
 import { forEachTab, getTabUrl, injectableRe, openDashboard, tabsOnRemoved, tabsOnUpdated } from './tabs';
 import { testBlacklist } from './tester';
+import { CMD_PREFIX, contextMenus, handlePageMenuCommand } from './page-menu-commands';
 import { FIREFOX, ua } from './ua';
 
 /** 1x + HiDPI 1.5x, 2x */
@@ -22,30 +27,7 @@ const iconDataCache = {};
 /** @return {string | Promise<string>} */
 export const getImageData = url => iconCache[url] || (iconCache[url] = loadIcon(url));
 // Firefox Android does not support such APIs, use noop
-const browserAction = (() => {
-  // Using `chrome` namespace in order to skip our browser.js polyfill in Chrome
-  const api = chrome.browserAction;
-  // Some methods like setBadgeText added callbacks only in Chrome 67+.
-  const makeMethod = fn => (...args) => {
-    try {
-      // Suppress the "no tab id" error when setting an icon/badge as it cannot be reliably prevented
-      api::fn(...args, ignoreChromeErrors);
-    } catch (e) {
-      api::fn(...args);
-    }
-  };
-  return objectPick(api, [
-    'setIcon',
-    'setBadgeText',
-    'setBadgeBackgroundColor',
-    'setTitle',
-  ], fn => (fn ? makeMethod(fn) : noop));
-})();
-// Promisifying explicitly because this API returns an id in Firefox and not a Promise
-const contextMenus = chrome.contextMenus;
-
-/** @type {{ [tabId: string]: VMBadgeData }}*/
-export const badges = {};
+const browserAction = browser[__.MV3 ? 'action' : 'browserAction'];
 const KEY_SHOW_BADGE = 'showBadge';
 const KEY_BADGE_COLOR = 'badgeColor';
 const KEY_BADGE_COLOR_BLOCKED = 'badgeColorBlocked';
@@ -95,9 +77,11 @@ init.then(async () => {
   showBadge = getOption(KEY_SHOW_BADGE);
   badgeColor = getOption(KEY_BADGE_COLOR);
   badgeColorBlocked = getOption(KEY_BADGE_COLOR_BLOCKED);
-  forEachTab(updateState);
-  if (!isApplied) setIcon(); // sets the dimmed icon as default
-  if (contextMenus) {
+  if (!sessionData.init) {
+    forEachTab(updateState);
+    if (!isApplied) setIcon(); // sets the dimmed icon as default
+  }
+  if (contextMenus && (!__.MV3 || installedOver)) {
     const addToIcon = (id, title, opts) => (
       new Promise(resolve => (
         contextMenus.create({
@@ -109,6 +93,7 @@ init.then(async () => {
       ))
     ).then(ignoreChromeErrors);
     const badgeChild = { parentId: KEY_SHOW_BADGE, type: 'radio' };
+    if (__.MV3 && __.DEV) await addToIcon('reload', 'Reload extension');
     await addToIcon(SKIP_SCRIPTS, i18n('skipScripts'));
     for (const args of [
       [KEY_SHOW_BADGE, i18n('labelBadge')],
@@ -124,29 +109,68 @@ init.then(async () => {
   }
 });
 
-contextMenus?.onClicked.addListener(({ menuItemId: id }, tab) => {
-  handleHotkeyOrMenu(id, tab);
-});
-tabsOnRemoved.addListener(id => delete badges[id]);
-tabsOnUpdated.addListener((tabId, { url }, tab) => {
-  if (url) {
-    const [title] = getFailureReason(url);
-    if (title) updateState(tab, resetBadgeData(tabId, null), title);
+contextMenus?.onClicked.addListener(async ({ menuItemId: id, frameId }, tab) => {
+  if (init) await init;
+  if (!id.startsWith(CMD_PREFIX) || !handlePageMenuCommand(id, tab, frameId)) {
+    handleHotkeyOrMenu(id, tab);
   }
-}, FIREFOX && { properties: ['status'] });
+});
+tabsOnRemoved.addListener(async id => {
+  if (init) await init;
+  delete badges[id];
+  if (__.MV3) flushSession(kBadges, badges);
+});
+if (__.MV3) {
+  chrome.webNavigation.onCommitted.addListener(info => {
+    if (isTopFrame(info) && info.documentLifecycle !== 'prerender') {
+      onTabUpdated(info.tabId, info);
+    }
+  }, {
+    // A webpage may be navigated to a non-injectable page so we need to reset the badge.
+    // Listing the schemes explicitly to exclude detached devtools windows.
+    url: [{ schemes: ['http', 'https', 'file', 'chrome', 'chrome-extension'] }],
+  });
+}
+tabsOnUpdated.addListener(onTabUpdated, FIREFOX && { properties: ['status'] });
+
+/**
+ * @param {number} tabId
+ * @param {browser.tabs._OnUpdatedChangeInfo} change
+ * @param {chrome.tabs.Tab} [tab] not present when called from webNavigation.onCommitted
+ */
+async function onTabUpdated(tabId, { url, status }, tab) {
+  if (init) await init;
+  const loading = status === 'loading';
+  const title = !(__.MV3 && tab && loading) // skip "loading": in MV3 we use onCommitted
+    && (url ||= tab && getTabUrl(tab)) // when tab is reloaded there's no change of url
+    && getFailureReason(url)[0];
+  // A known failure reason or no script ran since tab started to load
+  if (title || status === 'complete' && !badges[tabId]) {
+    if (__.MV3 && isApplied && !title) registerInjector(); // tab loaded but scripts didn't run
+    updateState(
+      tab || { id: tabId },
+      resetBadgeData(tabId, title ? null : undefined),
+      title,
+    );
+  } else if (__.MV3 && !tab/*onCommitted*/ && badges[tabId]) {
+    // Resetting, but not updating the UI yet, waiting for scripts to run or tab load
+    delete badges[tabId];
+    flushSession(kBadges, badges);
+  }
+}
 
 function resetBadgeData(tabId, isInjected) {
   // 'total' and 'unique' must match showBadge in options-defaults.js
-  /** @type {VMBadgeData} */
-  const data = nest(badges, tabId);
+  const data = badges[tabId] ||= /** @type {VMBadgeData} */{};
   data.icon = iconDefault;
   data.total = 0;
   data.unique = 0;
-  data[IDS] = new Set();
+  data[IDS] = [];
   data[kFrameId] = undefined;
   data[INJECT] = isInjected;
   // Notify popup about non-injectable tab
   if (!isInjected) popupTabs[tabId]?.postMessage(null);
+  if (__.MV3) flushSession(kBadges, badges);
   return data;
 }
 
@@ -166,8 +190,10 @@ export function setBadge(ids, reset, { tab, [kFrameId]: frameId, [kTop]: isTop }
       [kFrameId]: totalMap = data[kFrameId] = {},
     } = data;
     // uniques
-    ids.forEach(idMap.add, idMap);
-    data.unique = idMap.size;
+    for (const id of ids) {
+      if (!idMap.includes(id)) idMap.push(id);
+    }
+    data.unique = idMap.length;
     // totals
     data.total = 0;
     totalMap[frameId] = ids.length;
@@ -181,28 +207,29 @@ export function setBadge(ids, reset, { tab, [kFrameId]: frameId, [kTop]: isTop }
 }
 
 function updateBadge({ id: tabId }, data = badges[tabId]) {
-  if (data) {
+  if (data && tabId >= 0) {
     browserAction.setBadgeText({
       text: `${data[showBadge] || ''}`,
       tabId,
-    });
+    }).catch(noop);
   }
 }
 
 function updateBadgeColor({ id: tabId }, data = badges[tabId]) {
-  if (data) {
+  if (data && tabId >= 0) {
     browserAction.setBadgeBackgroundColor({
       color: data[INJECT] ? badgeColor : badgeColorBlocked,
       tabId,
-    });
+    }).catch(noop);
   }
 }
 
 function updateState(tab, data, title) {
   const tabId = tab.id;
+  if (tabId < 0) return;
   if (!data) data = badges[tabId] || resetBadgeData(tabId);
   if (!title) [title] = getFailureReason(getTabUrl(tab), data);
-  browserAction.setTitle({ tabId, title });
+  browserAction.setTitle({ tabId, title }).catch(noop);
   setIcon(tab, data);
   updateBadge(tab, data);
 }
@@ -211,7 +238,9 @@ async function setIcon({ id: tabId } = {}, data = badges[tabId] || {}) {
   const mod = !isApplied ? 'w'
     : data[INJECT] !== true ? 'b'
       : '';
-  if (data.icon === mod) return;
+  if (data.icon === mod || tabId < 0) {
+    return;
+  }
   data.icon = mod;
   const pathData = {};
   const iconData = {};
@@ -226,7 +255,7 @@ async function setIcon({ id: tabId } = {}, data = badges[tabId] || {}) {
     tabId,
     path: pathData,
     imageData: iconData,
-  });
+  }).catch(noop);
 }
 
 /** Omitting `data` = check whether injection is allowed for `url` */
@@ -249,57 +278,33 @@ export function handleHotkeyOrMenu(id, tab) {
     openDashboard('');
   } else if (id === 'newScript') {
     commands.OpenEditor();
+  } else if (id === 'reload') {
+    chrome.runtime.reload();
   } else if (id === 'toggleInjection') {
     setOption(IS_APPLIED, !isApplied);
   } else if (id === 'updateScripts') {
     commands.CheckUpdate();
   } else if (id === 'updateScriptsInTab') {
     id = badges[tab.id]?.[IDS];
-    if (id) commands.CheckUpdate([...id]);
+    if (id) commands.CheckUpdate({ ids: id });
   } else if (id.startsWith(KEY_SHOW_BADGE)) {
     setOption(KEY_SHOW_BADGE, id.slice(KEY_SHOW_BADGE.length + 1));
   }
 }
 
 async function loadIcon(url) {
-  const img = new Image();
   const isOwn = url.startsWith(ICON_PREFIX);
-  img.src = isOwn ? url.slice(extensionOrigin.length) // must be a relative path in Firefox Android
-    : url.startsWith('data:') ? url
-      : makeDataUri(url[0] === 'i' ? url : await loadStorageCache(url))
-        || url;
-  await new Promise((resolve) => {
-    img.onload = resolve;
-    img.onerror = resolve;
-  });
-  let res;
-  let maxSize = !isOwn && (2 * 38); // dashboard icon size for 2xDPI
-  let { width, height } = img;
-  if (!width || !height) { // FF reports 0 for SVG
-    iconCache[url] = url;
-    return url;
+  if (!isOwn && !(url = makeDataUri(url[0] === 'i' ? url : await loadStorageCache(url)))) {
+    // not saving to iconCache[url] because it may be a temporary network problem
+    return;
   }
-  if (maxSize && (width > maxSize || height > maxSize)) {
-    maxSize /= width > height ? width : height;
-    width = Math.round(width * maxSize);
-    height = Math.round(height * maxSize);
-  }
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  canvas.width = width;
-  canvas.height = height;
-  ctx.drawImage(img, 0, 0, width, height);
-  try {
-    res = canvas.toDataURL();
-    if (isOwn) iconDataCache[url] = ctx.getImageData(0, 0, width, height);
-  } catch (err) {
-    res = url;
-  }
+  const [res, imageData] = await loadIconData(url, isOwn);
+  if (isOwn) iconDataCache[url] = imageData;
   iconCache[url] = res;
   return res;
 }
 
 async function loadStorageCache(url) {
   return await storage[S_CACHE].getOne(url)
-    ?? await storage[S_CACHE].fetch(url, 'res').catch(console.warn);
+    ?? await storage[S_CACHE].fetch(url).catch(console.warn);
 }

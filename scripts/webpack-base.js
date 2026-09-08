@@ -1,12 +1,16 @@
 const { resolve } = require('path');
 const { VueLoaderPlugin } = require('vue-loader');
+const webpack = require('webpack');
+const progressBarPlugin = require('progress-bar-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
+const InlineConstantExportsPlugin = require('@automattic/webpack-inline-constant-exports-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 const deepmerge = require('deepmerge');
+const escapeStringRegexp = require('escape-string-regexp').default;
 const GroupAssetsPlugin = require('./webpack-group-assets-plugin');
-const { alias, extensions, isProd } = require('./common');
+const { alias, extensions, isProd, MV3, DIST } = require('./common');
 
 const defaultHtmlOptions = {
   minify: isProd && {
@@ -52,24 +56,29 @@ const MIN_OPTS_MAIN = isProd && deepmerge.all([{}, MIN_OPTS, {
 const nodeModules = resolve('node_modules');
 
 const pages = [
-  'background',
+  !MV3 && 'background',
   'confirm',
   'options',
   'popup',
-];
+].filter(Boolean);
 const createHtmlPage = key => new HtmlWebpackPlugin({
   ...defaultHtmlOptions,
   filename: `${key}/index.html`,
   chunks: [`${key}/index`],
   title: 'Violentmonkey',
   scriptLoading: 'blocking', // we don't need `defer` and it breaks in some browsers, see #1632
+  inject: false,
   // For GroupAssetsPlugin, inject only `index.js` into `body` to avoid FOUC
   injectTo: item => ((item.attributes.src || '').endsWith('/index.js') ? 'body' : 'head'),
+  templateContent: ({ htmlWebpackPlugin: { tags: { headTags: head, bodyTags: body } } }) =>
+    `<!DOCTYPE html><meta charset=utf-8>${
+      MV3 ? `<script src=/get-data.js?${key}></script>` : ''
+    }${head}<body>${body}</body>`,
 });
 
 const splitVendor = prefix => ({
   [prefix]: {
-    test: new RegExp(`node_modules[/\\\\]${prefix}`),
+    test: new RegExp('[\\\\/]' + prefix),
     name: `public/lib/${prefix}`,
     chunks: 'all',
     priority: 100,
@@ -112,13 +121,12 @@ const styleOptions = {
 const postcssLoader = {
   loader: 'postcss-loader',
 };
-
-const getBaseConfig = () => ({
+const getBaseConfig = (page) => ({
   mode: isProd ? 'production' : 'development',
   target: 'web', // required by live reloading
-  devtool: isProd ? false : 'inline-source-map',
+  devtool: isProd ? false : page.startsWith('injected') ? 'inline-source-map' : 'source-map',
   output: {
-    path: resolve('dist'),
+    path: resolve(DIST),
     publicPath: '/',
     filename: '[name].js',
     hashFunction: 'xxhash64',
@@ -139,8 +147,9 @@ const getBaseConfig = () => ({
       // JS/TS
       {
         test: /\.m?[jt]sx?$/,
-        use: 'babel-loader',
-        exclude: file => /node_modules/.test(file) && !/vueleton|@vue[/\\]shared/.test(file),
+        loader: 'babel-loader',
+        exclude: file => /node_modules/.test(file) &&
+          !/vueleton|@vue[/\\]shared|@usync|@violentmonkey/.test(file),
       },
       // CSS
       {
@@ -186,11 +195,22 @@ const getBaseConfig = () => ({
           },
         },
       },
+      // Patch fflate to expose file timestamp
+      {
+        test: /fflate/,
+        loader: 'string-replace-loader',
+        options: {
+          search: / size: sc,/g,
+          replace: '$& time: b4(data,o+12),',
+          strict: true,
+        }
+      },
     ],
   },
   optimization: {
+    concatenateModules: true, // makes output simpler and closer to prod in debugging
     runtimeChunk: false,
-    splitChunks: {
+    splitChunks: !page && {
       cacheGroups: {
         'common-ui': {
           name: 'common-ui',
@@ -198,35 +218,51 @@ const getBaseConfig = () => ({
             /\bsvg/,
             // don't extract CSS as it'll change the relative order of rules which breaks appearance
             'src/common/(?!zip|.*\\.css$)',
-            'node_modules/@violentmonkey/shortcut',
-            'node_modules/@?vue',
+            '@violentmonkey/shortcut',
+            '/@?vue',
           ].map(re => re.source || re).join('|').replace(/\\?\//g, '[/\\\\]')),
           chunks: c => ![
             'background/index', // only 4kB of common code
-            'injected',
-            'injected-web',
           ].includes(c.name),
         },
         ...splitVendor('codemirror'),
       },
     },
     minimizer: isProd ? [
-      new CssMinimizerPlugin(),
+      !page && new CssMinimizerPlugin(),
       new TerserPlugin(MIN_OPTS_PUBLIC),
       new TerserPlugin(MIN_OPTS_MAIN),
-    ] : [],
+    ].filter(Boolean) : [],
   },
   plugins: [
-    new VueLoaderPlugin(),
-    new GroupAssetsPlugin(),
-    ...styleOptions.extract ? [new MiniCssExtractPlugin({
+    page === 'sw' && MV3 && new webpack.NormalModuleReplacementPlugin(/\/common\/tld$/, (r) => {
+      r.request += '-mv3';
+    }),
+    !process.env.GITHUB_ACTIONS && new progressBarPlugin({
+      format: '[:bar] :percent (:elapsed seconds), :msg',
+      summary: false,
+    }),
+    !page && new VueLoaderPlugin(),
+    !page && new GroupAssetsPlugin(),
+    !page && styleOptions.extract && new MiniCssExtractPlugin({
       filename: '[name].css',
-    })] : [],
-  ],
+    }),
+    !page && require('unplugin-icons/webpack')(),
+    new InlineConstantExportsPlugin([
+      RegExp(`/(${[
+        'consts.js',
+        'consts-sync.js',
+        'utils/dnr.js',
+        'utils/on-installed.js',
+        'utils/storage.js',
+      ].map(escapeStringRegexp).join('|')
+      })$`.replaceAll('/', String.raw`[/\\]`)),
+    ])
+  ].filter(Boolean),
 });
 
-const getPageConfig = () => {
-  const config = getBaseConfig();
+const getPageConfig = (...args) => {
+  const config = getBaseConfig(...args);
   config.entry = Object.fromEntries(pages.map(name => [`${name}/index`, `./src/${name}`]));
   config.plugins = [
     ...config.plugins,

@@ -1,29 +1,35 @@
-import bridge, { addBackgroundHandlers, addHandlers, onScripts } from './bridge';
-import { sendCmd } from './util';
-import { U8_fromBase64, UA_PROPS } from '../util';
+import { U8_fromBase64, UA_PROPS, UPLOAD } from '../util';
+import * as bridge from './bridge';
+import { makeSafeBlob, sendCmd } from './util';
 
-const {
-  fetch: safeFetch,
-  FileReader: SafeFileReader,
-  FormData: SafeFormData,
-} = global;
-const { arrayBuffer: getArrayBuffer, blob: getBlob } = ResponseProto;
-const BlobProto = SafeBlob[PROTO];
-const getBlobType = describeProperty(BlobProto, 'type').get;
-const getTypedArrayBuffer = describeProperty(getPrototypeOf(SafeUint8Array[PROTO]), 'buffer').get;
-const getReaderResult = describeProperty(SafeFileReader[PROTO], 'result').get;
-const readAsDataURL = SafeFileReader[PROTO].readAsDataURL;
-const fdAppend = SafeFormData[PROTO].append;
-const U8_set = SafeUint8Array[PROTO].set;
 const CHUNKS = 'chunks';
 const LOAD = 'load';
 const LOADEND = 'loadend';
-const isBlobXhr = req => req[kXhrType] === 'blob';
-/** @type {GMReq.Content} */
+/** @type {{ [id:string]: GMReq.Content }} */
 const requests = createNullObj();
+let BlobProto, getArrayBuffer, getBlob, getBlobType, getTypedArrayBuffer;
+let SafeFileReader, getReaderResult, readAsDataURL;
+let SafeFormData, fdAppend;
+let U8_set;
+let safeFetch;
 let navigator, getUAData, getUAProps, getHighEntropyValues;
+let SafeDOMParser, parseFromString;
 
-onScripts.push(data => {
+bridge.onScripts.push(data => {
+  safeFetch = fetch;
+  BlobProto = SafeBlob[PROTO];
+  SafeFileReader = FileReader;
+  SafeFormData = FormData;
+  U8_set = SafeUint8Array[PROTO].set;
+  fdAppend = SafeFormData[PROTO].append;
+  getArrayBuffer = ResponseProto.arrayBuffer;
+  getBlob = ResponseProto.blob;
+  getBlobType = describeProperty(BlobProto, 'type').get;
+  getReaderResult = describeProperty(SafeFileReader[PROTO], 'result').get;
+  getTypedArrayBuffer = describeProperty(getPrototypeOf(SafeUint8Array[PROTO]), 'buffer').get;
+  readAsDataURL = SafeFileReader[PROTO].readAsDataURL;
+  SafeDOMParser = DOMParser;
+  parseFromString = SafeDOMParser[PROTO].parseFromString;
   // The tab may have a different UA due to a devtools override or about:config
   navigator = global.navigator;
   getUAProps = [];
@@ -43,7 +49,7 @@ onScripts.push(data => {
 });
 
 // TODO: extract all prop names used across files into consts.js to ensure sameness
-addHandlers({
+bridge.addHandlers({
   /**
    * @param {GMReq.Message.Web} msg
    * @param {VMScriptInjectInto} realm
@@ -52,27 +58,29 @@ addHandlers({
   async HttpRequest(msg, realm) {
     if (IS_FIREFOX) msg = nullObjFrom(msg); // copying into our realm to set its props freely
     else setPrototypeOf(msg, null);
-    const { url } = msg;
     const data = !IS_FIREFOX && msg.data;
     const uaData = getUAData && navigator::getUAData();
-    const sch = url::slice(0, 5);
-    if (sch === 'data:' || sch === 'blob:') {
-      return requestVirtualUrl(msg, url, realm);
-    }
     requests[msg.id] = {
       __proto__: null,
       realm,
       [kXhrType]: msg[kXhrType],
     };
-    // In Firefox we recreate FormData in bg::decodeBody
-    if (data && data.length > 1 && data[1] !== 'usp') {
-      // TODO: support huge data by splitting it to multiple messages
-      msg.data = await encodeBody(data[0], data[1]);
-    }
+    // Not using Promise.all as it depends on Iterator which isn't trivial to guard,
+    // but letting the browser start fetch() or FileReader in a separate process/thread.
+    const blobJob = IS_FIREFOX && msg.url::slice(0, 5) === 'blob:'
+      && importBlob(msg.url, true);
+    // TODO: support huge data by splitting it to multiple messages
+    const bodyJob = data && data.length > 1 && data[1] !== 'usp'
+      && encodeBody(data[0], data[1]);
+    if (blobJob) msg.url = await blobJob;
+    if (bodyJob) msg.data = await bodyJob;
     msg.ua = getUAProps::map((fn, i) => (!i ? navigator : uaData)::fn());
     return sendCmd('HttpRequest', msg);
   },
   AbortRequest: true,
+  ParseHTML(args, realm, nodeRet) {
+    nodeRet[0] = safeApply(parseFromString, new SafeDOMParser(), args);
+  },
   UA: () => navigator::getUAProps[0](),
   UAD() {
     if (getUAData) {
@@ -87,77 +95,55 @@ addHandlers({
   UAH: hints => (navigator::getUAData())::getHighEntropyValues(hints),
 });
 
-addBackgroundHandlers({
+bridge.addBackgroundHandlers({
   /**
    * @param {GMReq.Message.BG} msg
    * @returns {Promise<void>}
    */
   async HttpRequested(msg) {
+    setPrototypeOf(msg, null);
     const { id, data } = msg;
     const req = requests[id];
     if (!req) {
-      if (process.env.DEV) console.warn('[HttpRequested][content]: no request for id', id);
+      if (__.DEV) console.warn('[HttpRequested][content]: no request for id', id);
       return;
     }
-    if (hasOwnProperty(msg, 'chunk')) {
+    if (msg.chunk) {
       processChunk(req, data, msg);
       return;
     }
     let response = data?.[kResponse];
     if (response != null) {
+      const wantsBinary = req[kXhrType];
+      const wantsBlob = wantsBinary === 'blob';
       if (msg.blobbed) {
-        response = await importBlob(response, isBlobXhr(req));
+        data[kResponse] = await (
+          req.p = importBlob(response, wantsBlob)
+        );
+        req.p = null;
         sendCmd('RevokeBlob', response);
       } else if (msg.chunked) {
         processChunk(req, response);
         response = req[CHUNKS];
         delete req[CHUNKS];
-        if (isBlobXhr(req)) {
-          response = new SafeBlob([response], { type: msg.contentType });
-        } else if (req[kXhrType]) {
+        if (wantsBlob) {
+          response = makeSafeBlob(response, msg.contentType);
+        } else if (wantsBinary) {
           response = response::getTypedArrayBuffer();
         } else {
           // sending text chunks as-is to avoid memory overflow due to concatenation
         }
+        data[kResponse] = response;
       }
-      data[kResponse] = response;
+    } else if (req.p) {
+      await req.p;
     }
-    if (msg.type === LOADEND) {
+    if (msg.type === LOADEND && !msg[UPLOAD]) {
       delete requests[msg.id];
     }
     sendHttpRequested(msg, req.realm);
   },
 });
-
-async function requestVirtualUrl(msg, url, realm) {
-  let data, eventLoad;
-  const { events, [kFileName]: fileName } = msg;
-  const wantsData = (eventLoad = events::includes(LOAD)) || events::includes(LOADEND);
-  if (wantsData || fileName && IS_FIREFOX) {
-    data = await importBlob(url, isBlobXhr(msg));
-  }
-  if (fileName) {
-    // download in bg to a) circumvent CSP in Firefox and b) use a single throttled download chain
-    sendCmd('DownloadBlob', [IS_FIREFOX ? data : url, fileName]);
-    data = null;
-  }
-  for (;;) {
-    msg = {
-      id: msg.id,
-      type: eventLoad ? LOAD : LOADEND,
-      data: {
-        finalUrl: url,
-        readyState: 4,
-        status: 200,
-        [kResponse]: data,
-        [kResponseHeaders]: '',
-      },
-    };
-    sendHttpRequested(msg, realm);
-    if (eventLoad) eventLoad = data = null;
-    else break;
-  }
-}
 
 function sendHttpRequested(msg, realm) {
   bridge.post('HttpRequested', msg, realm);

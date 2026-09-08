@@ -11,7 +11,12 @@ export {
 } from '@/common';
 export * from '@/common/consts';
 
-export const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'];
+export const CONSOLE_METHODS = ['log', 'info', 'warn', ERROR, 'debug'];
+
+export const addErrorStack = (err, localErr) => {
+  err.stack += '\n-----------\n' + localErr.stack;
+  return err;
+};
 
 export const fireBridgeEvent = (eventId, msg) => {
   const detail = cloneInto ? cloneInto(msg, document) : msg;
@@ -19,14 +24,14 @@ export const fireBridgeEvent = (eventId, msg) => {
   window::fire(evtMain);
 };
 
-export const bindEvents = (srcId, destId, bridge) => {
+export const bindEvents = (srcId, destId, onHandle, isHost) => {
   /* Using a separate event for `node` because CustomEvent can't transfer nodes,
    * whereas MouseEvent (and some others) can't transfer objects without stringification. */
   let incomingNodeEvent;
   window::on(srcId, e => {
     e::stopImmediatePropagation();
-    if (process.env.DEBUG) {
-      console.info(`[bridge.${bridge[IDS] ? 'host' : 'guest.web'}] received`,
+    if (__.DEBUG) {
+      console.info(`[bridge.${isHost ? 'host' : 'guest.web'}] received`,
         incomingNodeEvent ? e::getRelatedTarget() : e::getDetail());
     }
     if (!incomingNodeEvent) {
@@ -45,11 +50,11 @@ export const bindEvents = (srcId, destId, bridge) => {
       e = incomingNodeEvent;
       incomingNodeEvent = null; // must precede onHandle() to handle nested incoming event
     }
-    bridge.onHandle(e);
+    onHandle(e);
   }, true);
   /** In Content bridge `pageNode` is `realm` which is wired in setupContentInvoker */
-  bridge.post = (cmd, data, pageNode, contNode) => {
-    const node = bridge[IDS] ? contNode : pageNode;
+  return (cmd, data, pageNode, contNode) => {
+    const node = isHost ? contNode : pageNode;
     // Constructing the event now so we don't send anything if it throws on invalid `node`
     const evtNode = node && new SafeMouseEvent(destId, { __proto__: null, relatedTarget: node });
     fireBridgeEvent(destId, { cmd, data, node: !!evtNode });

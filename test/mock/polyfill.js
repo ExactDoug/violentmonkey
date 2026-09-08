@@ -41,8 +41,13 @@ for (const k of Object.keys(domProps)) {
 }
 Object.defineProperties(global, domProps);
 delete MessagePort.prototype.onmessage; // to avoid hanging
+global.IS_FIREFOX = false;
 global.PAGE_MODE_HANDSHAKE = 123;
 global.VAULT_ID = false;
+global.navigator.serviceWorker = {};
+global.__ = {
+  TEST: true,
+};
 Object.assign(URL, {
   blobCache: {},
   createObjectURL(blob) {

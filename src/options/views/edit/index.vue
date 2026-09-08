@@ -4,10 +4,15 @@
       <nav>
         <div
           v-for="(label, navKey) in navItems" :key="navKey"
-          class="edit-nav-item" :class="{active: nav === navKey}"
-          v-text="label"
+          class="edit-nav-item" :class="{ active: nav === navKey, 'with-icon': navKey === EXTERNALS }"
           @click="nav = navKey"
-        />
+        >{{
+          label
+        }}<template v-if="navKey === EXTERNALS">
+            <a @click.stop="onUpdateDeps"><icon name="refresh"/></a>
+            <span v-text="depsProgress" v-if="depsProgress"/>
+          </template>
+        </div>
       </nav>
       <div class="edit-name text-center ellipsis flex-1">
         <span class="subtle" v-if="script.config.removed" v-text="i18n('headerRecycleBin') + ' / '"/>
@@ -15,10 +20,14 @@
       </div>
       <p v-if="frozen && nav === 'code'" v-text="i18n('readonly')"
          class="text-upper text-right text-red"/>
-      <div v-else class="edit-hint text-right ellipsis">
+      <div v-else-if="browserWindows" class="edit-hint text-right ellipsis">
         <a :href="externalEditorInfoUrl"
            v-bind="EXTERNAL_LINK_PROPS"
            v-text="i18n('editHowToHint')"/>
+      </div>
+      <div class="mr-1">
+        <a class="btn-ghost" @click="clipboardCopy" tabindex="0"><IconCopy/></a>
+        <a class="btn-ghost" @click="clipboardPaste" tabindex="0" v-if="!frozen"><IconPaste/></a>
       </div>
       <div class="mr-1">
         <button v-text="i18n('buttonSave')" @click="save"
@@ -66,8 +75,9 @@
     />
     <vm-externals
       class="flex-auto"
-      v-else-if="nav === 'externals'"
+      v-else-if="nav === EXTERNALS"
       :value="script"
+      :updatedDep
     />
     <vm-help
       class="edit-body"
@@ -91,24 +101,30 @@
 </template>
 
 <script>
+import Icon from '@/common/ui/icon';
+import IconCopy from '~icons/mdi/content-copy';
+import IconPaste from '~icons/mdi/content-paste';
 import {
-  browserWindows,
+  browserWindows, getUniqId,
   debounce, formatByteLength, getScriptName, getScriptUpdateUrl, i18n, isEmpty,
   nullBool2string, sendCmdDirectly, trueJoin,
 } from '@/common';
-import { ERR_BAD_PATTERN, VM_DOCS_MATCHING, VM_HOME } from '@/common/consts';
+import { ERR_BAD_PATTERN, VM_DOCS_MATCHING, VM_HOME, kOrigTag, kTag } from '@/common/consts';
 import { deepCopy, deepEqual, objectPick } from '@/common/object';
 import { externalEditorInfoUrl, focusMe, getActiveElement, showMessage } from '@/common/ui';
 import { keyboardService } from '@/common/keyboard';
 import options from '@/common/options';
 import { getUnloadSentry } from '@/common/router';
+import { isGmStorageGranted } from '@/common/script';
 import { EXTERNAL_LINK_PROPS } from '@/common/ui';
 import {
   kDownloadURL, kExclude, kExcludeMatch, kHomepageURL, kIcon, kInclude, kMatch, kName, kOrigExclude, kOrigExcludeMatch,
-  kOrigInclude, kOrigMatch, kUpdateURL,
+  kOrigInclude, kOrigMatch, kUpdateURL, kComment,
 } from '../../utils';
 
+const EXTERNALS = 'externals';
 const CUSTOM_PROPS = {
+  [kComment]: '',
   [kName]: '',
   [kHomepageURL]: '',
   [kUpdateURL]: '',
@@ -118,7 +134,7 @@ const CUSTOM_PROPS = {
   [kOrigExclude]: true,
   [kOrigMatch]: true,
   [kOrigExcludeMatch]: true,
-  tags: '',
+  [kOrigTag]: true,
 };
 const toProp = val => val !== '' ? val : null; // `null` removes the prop from script object
 const CUSTOM_LISTS = [
@@ -126,6 +142,7 @@ const CUSTOM_LISTS = [
   kMatch,
   kExclude,
   kExcludeMatch,
+  kTag,
 ];
 const toList = text => (
   text.trim()
@@ -170,10 +187,11 @@ let $codeComp;
 let disposeList;
 let savedCopy;
 let shouldSavePositionOnSave;
-let toggleUnloadSentry;
+let portId, depsDone, depsTotal;
 
 const emit = defineEmits(['close']);
 const props = defineProps({
+  dirty: Boolean,
   /** @type {VMScript} */
   initial: Object,
   initialCode: String,
@@ -186,11 +204,13 @@ const nav = ref('code');
 const canSave = ref(false);
 const script = ref();
 const code = ref('');
-const codeDirty = ref(false);
+const codeDirty = ref(props.dirty);
 const commands = {
   save,
   close,
 };
+const depsProgress = ref('');
+const updatedDep = ref('');
 const hotkeys = ref();
 const errors = ref();
 const errorsLinks = computed(() => {
@@ -213,6 +233,7 @@ const hashPattern = computed(() => { // eslint-disable-line vue/return-in-comput
       )) {
         return val.length > 100 ? val.slice(0, 100) + '...' : val;
       }
+      if (key === kExcludeMatch) break; // the last key for site targets
     }
   }
 });
@@ -228,14 +249,15 @@ const navItems = computed(() => {
   return {
     code: i18n('editNavCode'),
     settings: i18n('editNavSettings'),
-    ...id && {
+    ...id && (size || isGmStorageGranted(meta)) && {
       values: i18n('editNavValues') + (size ? ` (${formatByteLength(size)})` : ''),
     },
-    ...(req || res) && { externals: [req, res]::trueJoin('/') },
+    ...(req || res) && { [EXTERNALS]: [req, res]::trueJoin('/') },
     help: '?',
   };
 });
 const scriptName = computed(() => (store.title = getScriptName(script.value)));
+const toggleUnloadSentry = getUnloadSentry(null, () => CM.focus());
 
 watch(nav, async val => {
   await nextTick();
@@ -273,7 +295,6 @@ watch(script, onScript);
 onMounted(() => {
   $codeComp = $code.value;
   CM = $codeComp.cm;
-  toggleUnloadSentry = getUnloadSentry(null, () => CM.focus());
   if (browserWindows && options.get('editorWindow') && global.history.length === 1) {
     browserWindows.getCurrent({ populate: true }).then(setupSavePosition);
   }
@@ -289,7 +310,6 @@ onMounted(() => {
 });
 
 onActivated(() => {
-  document.body.classList.add('edit-open');
   disposeList = [
     keyboardService.register('a-pageup', switchPrevPanel),
     keyboardService.register('a-pagedown', switchNextPanel),
@@ -301,13 +321,20 @@ onActivated(() => {
 });
 
 onDeactivated(() => {
-  document.body.classList.remove('edit-open');
   store.tags =
   store.title = null;
   toggleUnloadSentry(false);
   disposeList?.forEach(dispose => dispose());
+  chrome.runtime.onConnect.removeListener(onUpdateDepsProgress);
 });
 
+function clipboardCopy() {
+  navigator.clipboard.writeText($codeComp.getRealContent());
+}
+async function clipboardPaste() {
+  // not using setValue because our `dirty` handler reserves it for the initial unchanged code
+  CM.replaceRange(await navigator.clipboard.readText(), {line: 0, ch: 0}, {line: 1e99, ch: 0}, 'paste');
+}
 async function save() {
   if (!canSave.value) return;
   if (shouldSavePositionOnSave) savePosition();
@@ -322,6 +349,7 @@ async function save() {
       code: $codeComp.getRealContent(),
       config: {
         enabled: +config.enabled,
+        httpOnly: +config.httpOnly,
         notifyUpdates: notifyUpdates ? +notifyUpdates : null, // 0, 1, null
         shouldUpdate: collectShouldUpdate(config), // 0, 1, 2
       },
@@ -338,13 +366,15 @@ async function save() {
       message: '',
       bumpDate: true,
     });
-    const newId = res?.where?.id;
+    const newId = res.where.id;
+    const newScript = res.update;
     CM.markClean();
     codeDirty.value = false; // triggers onDirty which sets canSave
     canSave.value = false; // ...and set it explicitly in case codeDirty was false
     frozenNote.value = false;
     errors.value = res.errors;
-    script.value = res.update; // triggers onScript+onChange to handle the new `meta` and `props`
+    newScript.$cache = scr.$cache; // retains kStorageSize, the rest will be updated in initScript later
+    script.value = newScript; // triggers onScript+onChange to handle the new `meta` and `props`
     if (newId && !id) history.replaceState(null, scriptName.value, `${ROUTE_SCRIPTS}/${newId}`);
     fatal.value = null;
   } catch (err) {
@@ -394,6 +424,7 @@ function onScript(scr) {
   // Matching Vue model types, so deepEqual can work properly
   config._editable = shouldUpdate === 2;
   config.enabled = !!config.enabled;
+  config.httpOnly = !!config.httpOnly;
   config.shouldUpdate = !!shouldUpdate;
   config.notifyUpdates = nullBool2string(config.notifyUpdates);
   custom.noframes = nullBool2string(custom.noframes);
@@ -412,6 +443,31 @@ function onScript(scr) {
   onChange();
   if (!config.removed) savedCopy = deepCopy(scr);
 }
+async function onUpdateDeps() {
+  depsDone = depsTotal = 0;
+  chrome.runtime.onConnect.addListener(onUpdateDepsProgress);
+  const err = await sendCmdDirectly('UpdateDeps', {
+    id: script.value.props.id,
+    portId: portId = getUniqId(),
+  });
+  if (err) throw new Error(err);
+}
+function onUpdateDepsProgress(port) {
+  if (port.name !== portId) return;
+  port.onMessage.addListener(([url, done]) => {
+    if (done) {
+      ++depsDone;
+      updatedDep.value = url;
+    } else {
+      ++depsTotal;
+    }
+    if (depsDone === depsTotal) {
+      port.disconnect();
+    }
+    depsProgress.value = ` ${depsDone}/${depsTotal}`;
+  });
+}
+
 /** @param {chrome.windows.Window} [wnd] */
 async function savePosition(wnd) {
   if (options.get('editorWindow')) {
@@ -456,6 +512,9 @@ function setupSavePosition({ id: curWndId, tabs }) {
     justify-content: space-between;
     border-bottom: var(--border);
     background: inherit;
+    a.btn-ghost {
+      padding: 0 2px;
+    }
   }
   &-name {
     font-weight: bold;
@@ -467,7 +526,9 @@ function setupSavePosition({ id: curWndId, tabs }) {
   }
   &-nav-item {
     display: inline-block;
-    padding: 8px 16px;
+    $navPadX: 16px;
+    $navPadY: 8px;
+    padding: $navPadY $navPadX;
     cursor: pointer;
     &.active {
       background: var(--bg);
@@ -476,6 +537,22 @@ function setupSavePosition({ id: curWndId, tabs }) {
     &:not(.active):hover {
       background: var(--fill-0-5);
       box-shadow: 0 -1px 1px var(--fill-4);
+    }
+    &.with-icon {
+      padding-right: 0;
+      > a {
+        padding: $navPadY;
+        margin: -$navPadY 0 -$navPadY $navPadY;
+        &:not(:hover) {
+          color: inherit;
+        }
+        svg {
+          transform: translateY(2px); /* the icon is not centered innately */
+        }
+      }
+      > span {
+        padding-right: $navPadX;
+      }
     }
   }
   .edit-externals {
@@ -527,6 +604,9 @@ function setupSavePosition({ id: curWndId, tabs }) {
   .readonly {
     opacity: .75; /* opacity plays well with custom editor colors */
   }
+  [data-num]::after {
+    content: ' (' attr(data-num) ')';
+  }
 }
 
 .touch body {
@@ -539,7 +619,7 @@ function setupSavePosition({ id: curWndId, tabs }) {
   min-height: calc(100vh + 1px);
 }
 
-@media (max-width: 767px) {
+html.narrow {
   .edit-hint {
     display: none;
   }

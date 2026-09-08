@@ -1,46 +1,61 @@
-import bridge, { addBackgroundHandlers, addHandlers } from './bridge';
-import { addNonceAttribute } from './inject';
+import * as bridge from './bridge';
+import { addNonceAttribute, injectedInfo, injectedRealms } from './inject';
 import { decodeResource, elemByTag, makeElem, nextTask, sendCmd } from './util';
 
 const menus = createNullObj();
 const HEAD_TAGS = ['script', 'style', 'link', 'meta'];
 const { toLowerCase } = '';
-const { [IDS]: ids } = bridge;
+const jsonStringify = JSON.stringify;
+let sentMenus = '{}';
 let setPopupThrottle;
 let isPopupShown;
+let grantlessUsage;
 
-addBackgroundHandlers({
+bridge.addBackgroundHandlers({
+  SetGMI(data) {
+    for (const realm in injectedRealms) {
+      // Augment info if still injecting scripts
+      if (injectedInfo?.[realm]) assign(injectedInfo[realm], data);
+      bridge.post('SetGMI', data, realm);
+    }
+  },
+  [kUseMenu](state) {
+    bridge.useMenu = state; // eslint-disable-line no-import-assign
+    if (state) sendSetPopup();
+  },
+});
+
+bridge.addBackgroundHandlers({
   async PopupShown(state) {
-    await bridge[REIFY];
+    if (bridge.reify) await bridge.reify;
     isPopupShown = state;
+    for (const realm in bridge.grantless) {
+      bridge.post('GetGrantless', null, realm);
+    }
     sendSetPopup();
   },
 }, true);
 
-addHandlers({
+bridge.addHandlers({
   /** @this {Node} */
-  AddElement({ tag, attrs, cbId }, realm) {
-    let el;
-    let res;
-    try {
-      const parent = this
-        || HEAD_TAGS::includes(`${tag}`::toLowerCase()) && elemByTag('head')
-        || elemByTag('body')
-        || elemByTag('*');
-      el = makeElem(tag, attrs);
-      addNonceAttribute(el);
-      parent::appendChild(el);
-    } catch (e) {
-      // A page-mode userscript can't catch DOM errors in a content script so we pass it explicitly
-      // TODO: maybe move try/catch to bridge.onHandle and use bridge.call in all web commands
-      res = [`${e}`, e.stack];
-    }
-    bridge.post('Callback', { id: cbId, data: res }, realm, el);
+  AddElement({ tag, attrs }, realm, nodeRet) {
+    const parent = this
+      || HEAD_TAGS::includes(`${tag}`::toLowerCase()) && elemByTag('head')
+      || elemByTag('body')
+      || elemByTag('*');
+    const el = makeElem(tag, attrs);
+    addNonceAttribute(el);
+    parent::appendChild(el);
+    nodeRet[0] = el;
   },
 
   GetResource({ id, isBlob, key, raw }) {
     if (!raw) raw = bridge.cache[bridge.pathMaps[id]?.[key] || key];
     return raw ? decodeResource(raw, isBlob) : true;
+  },
+
+  SetGrantless(data) {
+    assign(grantlessUsage ??= createNullObj(), data);
   },
 
   RegisterMenu({ id, key, val }) {
@@ -64,9 +79,16 @@ export async function sendSetPopup(isDelayed) {
       setPopupThrottle = null;
     }
     await sendCmd('SetPopup', {
-      [IDS]: ids,
-      [INJECT_INTO]: bridge[INJECT_INTO],
+      [IDS]: bridge.ids,
+      [INJECT_INTO]: bridge.injectInto,
+      grantless: grantlessUsage,
       menus,
     });
+  } else if (bridge.useMenu) {
+    const str = jsonStringify(menus);
+    if (str !== sentMenus) {
+      sentMenus = str;
+      await sendCmd('SetMenus', str);
+    }
   }
 }

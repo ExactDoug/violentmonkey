@@ -5,7 +5,7 @@ const scopeSym = SafeSymbol.unscopables;
 const globalDesc = createNullObj();
 /** Original ~50 global functions such as setTimeout that some sites override.
  * Not saving all globals because it would waste a lot of time on each page and frame. */
-const globalFunctionDesc = assign(createNullObj(), builtinFuncs);
+const globalFunctionDesc = createNullObj();
 const globalKeysSet = FastLookup();
 const globalKeys = (function makeGlobalKeys() {
   const kWrappedJSObject = 'wrappedJSObject';
@@ -17,11 +17,9 @@ const globalKeys = (function makeGlobalKeys() {
   let desc;
   let v;
   for (const key of names) {
-    if (key in builtinFuncs)
-      continue;
     if (+key >= 0 && key < numFrames
       || isContentMode && (
-        key === process.env.INIT_FUNC_NAME || key === 'browser' || key === 'chrome'
+        key === __.INIT_FUNC_NAME || key === 'browser' || key === 'chrome'
       )
     ) {
       ok = false;
@@ -30,7 +28,7 @@ const globalKeys = (function makeGlobalKeys() {
       /* Saving built-in global descriptors except constructors and onXXX events,
          checking length>=3 to prevent calling String.prototype index getters */
       if (key >= 'a' && key <= 'z' && (key.length < 3 || key[0] !== 'o' || key[1] !== 'n')
-      && (desc = describeProperty(window, key))) {
+      && (desc = builtinFuncs[key] || describeProperty(window, key))) {
         setPrototypeOf(desc, null); // to read desc.XXX without calling Object.prototype getters
         (desc.enumerable && isFunction(desc.value)
           ? globalFunctionDesc
@@ -52,7 +50,8 @@ const globalKeys = (function makeGlobalKeys() {
     });
   }
   // wrappedJSObject is not included in getOwnPropertyNames so we add it explicitly.
-  if (IS_FIREFOX
+  if (!__.MV3
+  && IS_FIREFOX
   && !PAGE_MODE_HANDSHAKE
   && kWrappedJSObject in global
   && !globalKeysSet.get(kWrappedJSObject)) {
@@ -78,7 +77,7 @@ const updateGlobalDesc = name => {
     && describeProperty(src = src > 0 ? window : global, name);
   if (!desc) return;
   if (!descFn) setPrototypeOf(desc, null);
-  else if (process.env.DEV && getPrototypeOf(desc)) throw 'proto must be null';
+  else if (__.DEV && getPrototypeOf(desc)) throw 'proto must be null';
   /* ~45 enumerable action functions belong to `window` and need to be bound to it,
    * the non-enum ~10 can be unbound, and `eval` MUST be unbound to run in scope. */
   if (descFn) {
@@ -106,7 +105,7 @@ builtinGlobals = null; // eslint-disable-line no-global-assign
 /**
  * @desc Wrap helpers to prevent unexpected modifications.
  */
-export function makeGlobalWrapper(local) {
+export function makeGlobalWrapper(local, grantless) {
   let globals = globalKeysSet; // will be copied only if modified
   /* Browsers may return [object Object] for Object.prototype.toString(window)
      on our `window` proxy so jQuery libs see it as a plain object and throw
@@ -119,6 +118,7 @@ export function makeGlobalWrapper(local) {
       if (name in local
       || !(_ = globalDesc[name] || updateGlobalDesc(name))
       || _.configurable) {
+        if (grantless) grantless[name] = 1;
         /* It's up to caller to protect proto */// eslint-disable-next-line no-restricted-syntax
         return defineProperty(local, name, desc);
       }
@@ -132,6 +132,7 @@ export function makeGlobalWrapper(local) {
         }
         globals.delete(name);
       }
+      if (grantless) grantless[name] = 1;
       return !!_;
     },
     get: (_, name) => {
@@ -141,11 +142,13 @@ export function makeGlobalWrapper(local) {
     },
     getOwnPropertyDescriptor: (_, name) => describeProperty(local, name)
       || proxyDescribe(local, name, wrapper, events),
-    has: (_, name) => name in globalDesc || name in local || updateGlobalDesc(name),
+    has: (_, name) => name in globalDesc || name in local || updateGlobalDesc(name)
+      || grantless && (grantless[name] = 0),
     ownKeys: () => makeOwnKeys(local, globals),
     preventExtensions() {},
     set(_, name, value) {
       if (!(name in local)) proxyDescribe(local, name, wrapper, events);
+      if (grantless) grantless[name] = 1;
       local[name] = value;
       return true;
     },

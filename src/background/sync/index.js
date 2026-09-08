@@ -1,27 +1,30 @@
+import { SYNC_MERGE } from '@/common/consts-sync';
+import { addOwnCommands, hookOptionsInit } from '../utils';
+import { kAlarmSync } from '../utils/session-data';
+import { onStorageChanged, S_CODE_PRE, S_SCRIPT_PRE } from '../utils/storage';
 import {
-  initialize,
-  sync,
-  getStates,
   authorize,
+  autoSync,
+  getStates,
+  initialize,
   revoke,
   setConfig,
-} from './base';
+  setSyncOnceMode,
+  sync,
+} from './sync-engine';
 import './dropbox';
-import './onedrive';
 import './googledrive';
+import './onedrive';
 import './webdav';
-import { addOwnCommands, hookOptionsInit } from '../utils';
-import { S_CODE_PRE, S_SCRIPT_PRE } from '../utils/storage';
-import { onStorageChanged } from '../utils/storage-cache';
+import './s3';
 
-const keysToSyncRe = new RegExp(`^(?:${[
-  S_SCRIPT_PRE,
-  S_CODE_PRE,
-].join('|')})`);
+const keysToSyncRe = new RegExp(`^(?:${[S_SCRIPT_PRE, S_CODE_PRE].join('|')})`);
 let unwatch;
 
 hookOptionsInit((changes, firstRun) => {
-  if ('sync.current' in changes || firstRun) reconfigure();
+  if (firstRun || 'sync.current' in changes) {
+    reconfigure();
+  }
 });
 
 addOwnCommands({
@@ -29,10 +32,13 @@ addOwnCommands({
   SyncGetStates: getStates,
   SyncRevoke: revoke,
   SyncSetConfig: setConfig,
-  SyncStart: sync,
+  SyncStart(mode) {
+    setSyncOnceMode(mode || SYNC_MERGE);
+    sync();
+  },
 });
 
-function reconfigure() {
+async function reconfigure() {
   if (initialize()) {
     if (!unwatch) {
       unwatch = onStorageChanged(dbSentry);
@@ -43,12 +49,16 @@ function reconfigure() {
       unwatch = null;
     }
   }
+  if (__.MV3 && !unwatch !== !await chrome.alarms.get(kAlarmSync)) {
+    if (unwatch) chrome.alarms.create(kAlarmSync, { periodInMinutes: 60 });
+    else chrome.alarms.clear(kAlarmSync);
+  }
 }
 
-function dbSentry({ keys }) {
+function dbSentry(keys) {
   for (const k of keys) {
     if (keysToSyncRe.test(k)) {
-      sync();
+      autoSync();
       break;
     }
   }

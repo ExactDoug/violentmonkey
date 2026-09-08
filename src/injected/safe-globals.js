@@ -9,7 +9,7 @@
 export const PROTO = 'prototype';
 export const CALLBACK_ID = '__CBID';
 
-export const throwIfProtoPresent = process.env.DEBUG && (obj => {
+export const throwIfProtoPresent = __.DEBUG && (obj => {
   if (!obj || obj.__proto__) { // eslint-disable-line no-proto
     throw 'proto is not null';
   }
@@ -26,26 +26,7 @@ export const getOwnProp = (obj, key, defVal) => {
   return defVal;
 };
 
-/**
- * @param {T} obj
- * @param {string|Symbol} key
- * @param {?} value
- * @param {boolean} [mutable]
- * @param {'set' | 'get'} [valueKey]
- * @return {T}
- * @template T
- */
-export const setOwnProp = (obj, key, value, mutable = true, valueKey) => (
-  defineProperty(obj, key, {
-    __proto__: null,
-    [valueKey || 'value']: value,
-    [!valueKey && 'writable']: mutable, // only allowed for 'value'
-    configurable: mutable,
-    enumerable: mutable,
-  })
-);
-
-export const nullObjFrom = src => process.env.TEST
+export const nullObjFrom = src => __.TEST
   ? global.Object.assign({ __proto__: null }, src)
   : assign(createNullObj(), src);
 
@@ -62,22 +43,14 @@ export const safePickInto = (dst, src, keys) => {
   return dst;
 };
 
-// WARNING! `obj` must use __proto__:null
-export const ensureNestedProp = (obj, bucketId, key, defaultValue) => {
-  if (process.env.DEBUG) throwIfProtoPresent(obj);
-  const bucket = obj[bucketId] || (
-    obj[bucketId] = createNullObj()
-  );
-  const val = bucket[key] ?? (
-    bucket[key] = (defaultValue ?? createNullObj())
-  );
-  return val;
-};
-
 export const promiseResolve = async val => val;
 
-// Using just one random() to avoid many methods in vault just for this
-export const safeGetUniqId = (prefix = 'VM') => prefix + mathRandom();
+/** Not adding any prefix by default to make Spectre exfiltration harder */
+export const safeGetUniqId = (prefix = '') => prefix + (
+  U8_toBase64 // minimum_chrome_version>=140, strict_min_version>=133
+  ? getRandomValues(new SafeUint8Array(12))::U8_toBase64()
+  : safeBtoa(safeApply(stringFromCharCode, null, getRandomValues(new SafeUint8Array(16))))
+);
 
 /** args is [tags?, ...rest] */
 export const log = (level, ...args) => {

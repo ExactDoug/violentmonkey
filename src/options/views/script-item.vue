@@ -14,29 +14,34 @@
     @blur="setScriptFocus(false)">
     <div class="script-icon hidden-xs">
       <a :href="url" :data-hotkey="hotkeys.edit" data-hotkey-table tabIndex="-1">
-        <img :src="script.safeIcon" :data-no-icon="script.noIcon">
+        <img :src="cache.safeIcon" :data-no-icon="cache.noIcon">
       </a>
     </div>
     <!-- We disable native dragging on name to avoid confusion with exec re-ordering.
     Users who want to open a new tab via dragging the link can drag the icon. -->
     <div class="script-info-1 ellipsis">
-      <a v-text="script.$cache.name" v-bind="viewTable && { draggable: false, href: url, tabIndex }"
+      <a v-bind="viewTable && { draggable: false, href: url, tabIndex }"
          :data-order="isRemoved ? null : script.props.position"
-         class="script-name ellipsis" />
+         class="script-name ellipsis">
+        <template v-if="(n = cache.name, m = cache.mark)">{{
+          n.slice(0, m.index)}}<mark v-text="m[0]"/>{{n.slice(m.index + m[0].length)
+        }}</template>
+        <template v-else>{{n}}</template>
+      </a>
       <div class="script-tags" v-if="canRender">
         <a
-          v-for="(item, i) in tags.slice(0, 2)"
+          v-for="(item, i) in cache[kTag].slice(0, 2)"
           :key="i"
           v-text="`#${item}`"
           @click.prevent="onTagClick(item)"
           :class="{ active: activeTags?.includes(item) }"
           :data-tag="item"
         ></a>
-        <Dropdown v-if="tags.length > 2">
+        <Dropdown v-if="cache[kTag].length > 2">
           <a>...</a>
           <template #content>
             <a
-              v-for="(item, i) in tags.slice(2)"
+              v-for="(item, i) in cache[kTag].slice(2)"
               :key="i"
               class="dropdown-menu-item"
               v-text="`#${item}`"
@@ -68,8 +73,8 @@
                  v-if="showVisit">
           {{ visit.show }}
         </tooltip>
-        <tooltip class="size hidden-sm" :content="script.$cache.sizes" align="end" v-if="!isRemoved">
-          {{ script.$cache.size }}
+        <tooltip class="size hidden-sm" :content="cache.sizes" align="end">
+          {{ cache.size }}
         </tooltip>
         <tooltip class="updated hidden-sm ml-1c" :content="updatedAt.title" align="end">
           {{ updatedAt.show }}
@@ -95,7 +100,9 @@
           </tooltip>
           <tooltip
             :disabled="!canUpdate || script.checking"
-            :content="i18n('updateScript')"
+            :content="i18n('updateScript') + ' | ' + i18nUpdateScriptForced"
+            :title="!canUpdate && canUpdateDeps ? i18nUpdateScriptForced : null"
+            v-on="{ contextmenu: (canUpdate || canUpdateDeps) && !script.checking && onUpdate }"
             align="start">
             <a
               class="btn-ghost"
@@ -150,12 +157,13 @@
 
 <script>
 import { formatTime, getLocaleString, getScriptHome, getScriptSupportUrl, i18n } from '@/common';
-import { INFERRED } from '@/common/consts';
+import { INFERRED, kTag } from '@/common/consts';
 import { EXTERNAL_LINK_PROPS, getActiveElement, showConfirmation } from '@/common/ui';
 import { isInput, keyboardService, toggleTip } from '@/common/keyboard';
 import { kDescription, store, TOGGLE_OFF, TOGGLE_ON } from '../utils';
 
 const itemMargin = 8;
+const i18nUpdateScriptForced = i18n('updateScriptForced');
 const visitedRecently = new Set();
 const refreshVisited = () => { store.now = Date.now(); };
 const scheduleRefreshVisited = () => setInterval(refreshVisited, 60e3);
@@ -164,10 +172,10 @@ let visitedRecentlyInterval;
 </script>
 
 <script setup>
+import { computed, ref, watch } from 'vue';
 import Dropdown from 'vueleton/lib/dropdown';
 import Tooltip from 'vueleton/lib/tooltip';
 import Icon from '@/common/ui/icon';
-import { computed, ref, watch } from 'vue';
 
 const props = defineProps([
   'script',
@@ -201,7 +209,14 @@ const author = computed(() => {
     name: matches ? matches[1] : text,
   };
 });
+const cache = computed(() => props.script.$cache);
 const canUpdate = computed(() => props.script.$canUpdate);
+const notDataUrlRe = /^(?!data:)/;
+const canUpdateDeps = computed(() => {
+  const { meta } = props.script;
+  return meta.require.some(notDataUrlRe.test, notDataUrlRe)
+    || Object.values(meta.resources).some(notDataUrlRe.test, notDataUrlRe);
+});
 const description = computed(() => {
   return props.script.custom[kDescription] || getLocaleString(props.script.meta, kDescription);
 });
@@ -210,9 +225,6 @@ const labelEnable = computed(() => {
 });
 const tabIndex = computed(() => {
   return props.focused ? 0 : -1;
-});
-const tags = computed(() => {
-  return props.script.custom.tags?.split(' ').filter(Boolean) || [];
 });
 const updatedAt = computed(() => {
   const { props: scrProps } = props.script;
@@ -233,9 +245,7 @@ const visit = computed(() => {
     title: new Date(time).toLocaleString() + '. ' + i18n('filterLastVisitOrderTooltip'),
   } : {};
 });
-const url = computed(() => `#${
-  isRemoved.value ? TAB_RECYCLE : SCRIPTS}/${props.script.props.id}
-`);
+const url = computed(() => `#${isRemoved.value ? TAB_RECYCLE : SCRIPTS}/${props.script.props.id}`);
 const urls = computed(() => ({
   home: [i18n('buttonHome'), getScriptHome(props.script)],
   question: [i18n('buttonSupport'), getScriptSupportUrl(props.script)],
@@ -246,10 +256,14 @@ const onRemove = () => emitScript('remove');
 const onRestore = () => emitScript('restore');
 const onTagClick = item => emit('clickTag', item);
 const onToggle = () => emitScript('toggle');
-const onUpdate = async () => {
-  if (props.script.$canUpdate !== -1
+const onUpdate = async evt => {
+  evt.preventDefault(); // for contextmenu
+  let what = props.script;
+  if (what.$canUpdate !== -1
   || await showConfirmation(i18n('confirmManualUpdate'))) {
-    emitScript('update');
+    what = [what];
+    what.force = evt.type !== 'click';
+    emit('update', what);
   }
 };
 /**
@@ -268,7 +282,7 @@ function formatDynamicTime({ id }, time) {
       visitedRecentlyInterval = clearInterval(refreshVisited);
     }
   }
-  return formatTime(time);
+  return formatTime(Math.max(0, time));
 }
 
 watch(() => props.visible, visible => {
@@ -354,6 +368,7 @@ $removedItemHeight: calc(
   &.removed {
     grid-template-columns: $iconSize auto 1fr auto auto;
     height: $removedItemHeight;
+    padding-top: $removedItemPadB;
     padding-bottom: $removedItemPadB;
   }
   &:not(.removed) {
@@ -387,7 +402,9 @@ $removedItemHeight: calc(
     display: flex;
     gap: 8px;
     align-items: center;
-    align-self: flex-start;
+    .script:not(.removed) & {
+      align-self: flex-start;
+    }
   }
   &-name {
     font-weight: 500;
@@ -649,7 +666,7 @@ $removedItemHeight: calc(
     [data-hotkey-table]::after {
       content: none;
     }
-    .size {
+    .script:not(.removed) .size {
       position: absolute;
       bottom: 10px;
       right: 40px;

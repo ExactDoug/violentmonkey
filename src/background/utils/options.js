@@ -1,26 +1,13 @@
-import { compareVersion, debounce, initHooks, normalizeKeys, sendCmd } from '@/common';
+import { compareVersion, debounce, initHooks, normalizeKeys } from '@/common';
 import { deepCopy, deepEqual, objectGet, objectSet } from '@/common/object';
 import defaults, { kScriptTemplate } from '@/common/options-defaults';
-import { addOwnCommands, init } from './init';
+import broadcast from './broadcast';
+import { addOwnCommands, init, initDependency } from './init';
 import storage from './storage';
 
 let changes;
 
-addOwnCommands({
-  /** @return {Object} */
-  GetAllOptions() {
-    return Object.assign({}, defaults, options); // eslint-disable-line no-use-before-define
-  },
-  /**
-   * @param {{ [key:string]: PlainJSONValue }} data
-   * @return {void}
-   * @throws {?} hooks can throw after the option was set */
-  SetOptions(data) {
-    for (const key in data) setOption(key, data[key], true);
-    callHooks(); // exceptions will be sent to the caller
-  },
-});
-
+export const getAllOptions = () => ({ ...defaults, ...options });
 const options = {};
 export const kOptions = 'options';
 export const kVersion = 'version';
@@ -38,12 +25,25 @@ const callHooksLater = debounce(callHooks, DELAY);
 const writeOptionsLater = debounce(writeOptions, DELAY);
 const optProxy = new Proxy(defaults, { get: (_, key) => getOption(key) });
 export const hookOptions = hooks.hook;
-hookOptions(data => sendCmd('UpdateOptions', data));
+hookOptions(data => broadcast('UpdateOptions', data));
+
+addOwnCommands({
+  GetAllOptions: getAllOptions,
+  /**
+   * @param {{ [key:string]: PlainJSONValue }} data
+   * @return {void}
+   * @throws {?} hooks can throw after the option was set */
+  SetOptions(data) {
+    for (const key in data) setOption(key, data[key], true);
+    callHooks(); // exceptions will be sent to the caller
+  },
+});
 
 export function initOptions(data, lastVersion, versionChanged) {
+  for (const key in options) delete options[key];
   data = data[kOptions] || {};
   Object.assign(options, data);
-  if (process.env.DEBUG) console.info('options:', options);
+  if (__.DEBUG) console.info('options:', options);
   if (!options[kVersion]) {
     setOption(kVersion, 1);
   }
@@ -59,6 +59,10 @@ export function initOptions(data, lastVersion, versionChanged) {
     if (IS_FIREFOX && options[key = 'defaultInjectInto'] === PAGE
     && compareVersion(lastVersion, '2.12.7') <= 0) {
       options[key] = AUTO;
+    }
+    if (__.MV3 && options[key = 'ffInject']
+    && compareVersion(lastVersion, '2.45.4') <= 0) {
+      options[key] = false; // In older VM it was enabled by default but used only in Firefox
     }
     if ((val = options.filters) && val[key = 'sort'] === 'exec'
     && compareVersion(lastVersion, '2.31.2') <= 0) {
@@ -89,7 +93,7 @@ function callHooks() {
 
 /** Hooks and calls the callback with a copy of all options when init is resolved */
 export function hookOptionsInit(cb) {
-  if (init) init.then(() => cb(optProxy, true));
+  if (init) initDependency(() => cb(optProxy, true));
   else cb(optProxy, true);
   return hookOptions(cb);
 }
@@ -109,20 +113,20 @@ export function setOption(key, value, silent) {
   const mainKey = keys[0];
   key = keys.join('.'); // must be a string for addChange()
   if (!hasOwnProperty(defaults, mainKey)) {
-    if (process.env.DEBUG) console.info('Unknown option:', key, value, options);
+    if (__.DEBUG) console.info('Unknown option:', key, value, options);
     return;
   }
   const subKey = keys.length > 1 && keys.slice(1);
   const mainVal = getOption([mainKey]);
   if (deepEqual(value, subKey ? objectGet(mainVal, subKey) : mainVal)) {
-    if (process.env.DEBUG) console.info('Option unchanged:', key, value, options);
+    if (__.DEBUG) console.info('Option unchanged:', key, value, options);
     return;
   }
   options[mainKey] = subKey ? objectSet(mainVal, subKey, value) : value;
   omitDefaultValue(mainKey);
   writeOptionsLater();
   addChange(key, value, silent);
-  if (process.env.DEBUG) console.info('Options updated:', key, value, options);
+  if (__.DEBUG) console.info('Options updated:', key, value, options);
 }
 
 function writeOptions() {

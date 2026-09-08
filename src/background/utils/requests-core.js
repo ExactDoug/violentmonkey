@@ -1,14 +1,13 @@
-import { buffer2string, getUniqId, isEmpty, noop } from '@/common';
+import { buffer2string, isEmpty, noop } from '@/common';
 import { forEachEntry } from '@/common/object';
 import { CHROME } from './ua';
 
 let encoder;
 
-export const VM_VERIFY = getUniqId('VM-Verify');
 /** @type {Object<string,GMReq.BG>} */
 export const requests = { __proto__: null };
 export const verify = { __proto__: null };
-export const FORBIDDEN_HEADER_RE = re`/
+export const FORBIDDEN_HEADER_RE = regex('i')`
 ^(
   # prefix matches
   proxy-|
@@ -34,45 +33,44 @@ export const FORBIDDEN_HEADER_RE = re`/
   transfer-encoding|
   upgrade|
   via
-)$/ix`;
+)$`;
 /** @type {chrome.webRequest.RequestFilter} */
 const API_FILTER = {
   urls: ['<all_urls>'],
   types: ['xmlhttprequest'],
 };
 const EXTRA_HEADERS = [
+  !__.MV3 && 'blocking',
   browser.webRequest.OnBeforeSendHeadersOptions.EXTRA_HEADERS,
 ].filter(Boolean);
 const headersToInject = {};
-/** @param {chrome.webRequest.HttpHeader} header */
-const isVmVerify = header => header.name === VM_VERIFY;
 export const kCookie = 'cookie';
 export const kSetCookie = 'set-cookie';
-const SET_COOKIE_VALUE_RE = re`
-  /^\s*  (?:__(Secure|Host)-)?  ([^=\s]+)  \s*=\s*  (")?  ([!#-+\--:<-[\]-~]*)  \3(.*)  /x`;
-const SET_COOKIE_ATTR_RE = re`
-  /\s*  ;?\s*  (\w+)  (?:= (")?  ([!#-+\--:<-[\]-~]*)  \2)?  /xy`;
+const SET_COOKIE_VALUE_RE = regex({ disable: { n: true } })`
+  ^\s*  (?:__(Secure|Host)-)?  ([^=\s]+)  \s*=\s*  (")?  ([!#-+\--:\<-\[\]-~]*)  \3(.*)`;
+const SET_COOKIE_ATTR_RE = regex({ disable: { n: true }, flags: 'y' })`
+  \s*  ;?\s*  (\w+)  (?:= (")?  ([!#-+\--:\<-\[\]-~]*)  \2)?`;
 const SAME_SITE_MAP = {
   strict: 'strict',
   lax: 'lax',
   none: 'no_restriction',
 };
-const kRequestHeaders = 'requestHeaders';
+export const kRequestHeaders = 'requestHeaders';
 const API_EVENTS = {
-  onBeforeSendHeaders: [
-    onBeforeSendHeaders, kRequestHeaders, 'blocking', ...EXTRA_HEADERS,
-  ],
-  onHeadersReceived: [
-    onHeadersReceived, kResponseHeaders, 'blocking', ...EXTRA_HEADERS,
-  ],
+  onBeforeSendHeaders: [onBeforeSendHeaders, kRequestHeaders, ...EXTRA_HEADERS],
+  onHeadersReceived: [onHeadersReceived, kResponseHeaders, ...EXTRA_HEADERS],
 };
+/** Chrome leaks empty dynamic registrations, https://crbug.com/526929792 */
+const CHROME_REG_LEAK_BUG = __.MV3 && CHROME >= 146;
 
-/** @param {chrome.webRequest.WebRequestHeadersDetails} details */
-function onHeadersReceived({ [kResponseHeaders]: headers, requestId, url }) {
+/** @param {chrome.webRequest.WebRequestDetails} details */
+function onHeadersReceived({ [kResponseHeaders]: headers, requestId, tabId, url }) {
+  if (CHROME_REG_LEAK_BUG && tabId !== -1) return;
   const req = requests[verify[requestId]];
   if (req) {
     // Populate responseHeaders for GM_xhr's `response`
     req[kResponseHeaders] = headers.map(encodeWebRequestHeader).join('');
+    if (__.MV3) return;
     const { storeId } = req;
     // Drop Set-Cookie headers if anonymous or using a custom storeId
     if (!req[kSetCookie] || storeId) {
@@ -85,23 +83,33 @@ function onHeadersReceived({ [kResponseHeaders]: headers, requestId, url }) {
   }
 }
 
-/** @param {chrome.webRequest.WebRequestHeadersDetails} details */
-function onBeforeSendHeaders({ [kRequestHeaders]: headers, requestId, url }) {
-  // only the first call during a redirect/auth chain will have VM-Verify header
-  const reqId = verify[requestId] || headers.find(isVmVerify)?.value;
-  const req = requests[reqId];
+/** @param {chrome.webRequest.WebRequestDetails} details */
+function onBeforeSendHeaders({ [kRequestHeaders]: headers, requestId, tabId, url }) {
+  if (CHROME_REG_LEAK_BUG && tabId !== -1) return;
+  let req;
+  let reqId = verify[requestId];
+  if (reqId) {
+    req = requests[reqId];
+  } else {
+    reqId = url.split('#')[1];
+    req = requests[reqId];
+    if (req) {
+      verify[requestId] = reqId;
+      req.coreId = requestId;
+    }
+  }
   if (req) {
-    verify[requestId] = reqId;
-    req.coreId = requestId;
-    req.url = url; // remember redirected URL with #hash as it's stripped in XHR.responseURL
+    // remember redirected URL with #hash as it's stripped in XHR.responseURL
+    // browsers re-append our #reqId to redirected URL if the server didn't redirect to a new #hash
+    if (url !== req.xhrUrl) req.url = url.replace('#' + reqId, '');
+    if (__.MV3) return;
     const headersMap = {};
     const headers2 = headersToInject[reqId];
     const combinedHeaders = headers2 && {};
-    let name;
     let h2 = !headers2;
     for (const h of headers) {
-      if ((name = h.name) === VM_VERIFY
-      || (name = name.toLowerCase()) === 'origin' && h.value === extensionOrigin
+      let name = h.name.toLowerCase();
+      if (name === 'origin' && h.value === extensionOrigin
       || name === kCookie && !req[kCookie]) {
         continue;
       }
@@ -119,9 +127,6 @@ function onBeforeSendHeaders({ [kRequestHeaders]: headers, requestId, url }) {
 
 export function toggleHeaderInjector(reqId, headers) {
   if (headers) {
-    /* Listening even if `headers` array is empty to get the request's id.
-     * Registering just once to avoid a bug in Chrome:
-     * it adds a new internal registration even if the function reference is the same */
     if (isEmpty(headersToInject)) {
       API_EVENTS::forEachEntry(([name, [listener, ...options]]) => {
         browser.webRequest[name].addListener(listener, API_FILTER, options);
@@ -131,7 +136,7 @@ export function toggleHeaderInjector(reqId, headers) {
     headersToInject[reqId] = headers;
   } else if (reqId in headersToInject) {
     delete headersToInject[reqId];
-    if (isEmpty(headersToInject)) {
+    if (!CHROME_REG_LEAK_BUG && isEmpty(headersToInject)) {
       API_EVENTS::forEachEntry(([name, [listener]]) => {
         browser.webRequest[name].removeListener(listener);
       });
@@ -195,6 +200,8 @@ function string2byteString(str) {
 
 // Chrome 74-91 needs an extraHeaders listener at tab load start, https://crbug.com/1074282
 // We're attaching a no-op in non-blocking mode so it's very lightweight and fast.
-if (CHROME >= 74 && CHROME <= 91) {
+if (!__.MV3 && CHROME >= 74 && CHROME <= 91) {
   browser.webRequest.onBeforeSendHeaders.addListener(noop, API_FILTER, EXTRA_HEADERS);
 }
+// Attaching globally will see all XHRs in all tabs because tabId:-1 in addListener is ignored
+if (CHROME_REG_LEAK_BUG) toggleHeaderInjector('', []);

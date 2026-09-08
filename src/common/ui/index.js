@@ -6,9 +6,9 @@ import Message from './message';
 import { VM_HOME } from '@/common/consts';
 
 /** Showing unexpected errors in UI so that the users can notify us */
-addEventListener('error', e => showUnhandledError(e.error));
-addEventListener('unhandledrejection', e => showUnhandledError(e.reason));
-export function showUnhandledError(err) {
+global.onerror = global.onunhandledrejection = showUnhandledError;
+
+export function showUnhandledError(a, b, c, d, err = a?.reason || a) {
   if (!err) return;
   const id = 'unhandledError';
   const fontSize = 10;
@@ -20,7 +20,7 @@ export function showUnhandledError(err) {
       : `${err}`,
   ]::trueJoin('\n\n').trim().split(extensionRoot).join('');
   const height = fontSize * (calcRows(text) + 1) + 'px';
-  const parent = document.body || document.documentElement;
+  const parent = document.body || docElem;
   el.id = id;
   el.readOnly = true;
   // using an inline style because we don't know if our CSS is loaded at this stage
@@ -157,6 +157,7 @@ function vFocusFactory() {
  */
 export const vFocus = vFocusFactory();
 export const isTouch = 'ontouchstart' in document;
+export const docElem = document.documentElement;
 export const getActiveElement = () => document.activeElement;
 /** @param {MouseEvent|KeyboardEvent} e */
 export const hasKeyModifiers = e => e.shiftKey || e.ctrlKey || e.metaKey || e.altKey;

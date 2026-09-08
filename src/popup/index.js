@@ -1,13 +1,12 @@
-import '@/common/browser';
-import { sendCmdDirectly } from '@/common';
+import { i18n, sendCmdDirectly } from '@/common';
 import handlers from '@/common/handlers';
 import { loadCommandIcon, loadScriptIcon } from '@/common/load-script-icon';
-import { mapEntry } from '@/common/object';
-import { isTouch, render } from '@/common/ui';
+import { render } from '@/common/ui';
 import '@/common/ui/style';
 import App from './views/app';
-import { emptyStore, store } from './utils';
+import { emptyStore, isFullscreenPopup, store } from './utils';
 
+let idMapMain, idMapFrames;
 let mutex, mutexResolve, port;
 let hPrev;
 
@@ -34,60 +33,68 @@ async function setPopup(data, { [kFrameId]: frameId, url }) {
   /* SetPopup from a sub-frame may come first so we need to wait for the main page
    * because we only show the iframe menu for unique scripts that don't run in the main page */
   const isTop = frameId === 0;
+  const dataIds = data[IDS];
   if (!data[MORE]) {
-    Object.assign(data[IDS], await sendCmdDirectly('GetMoreIds', {
+    Object.assign(dataIds, await sendCmdDirectly('GetMoreIds', {
       url,
       [kTop]: isTop,
-      [IDS]: data[IDS],
+      [IDS]: dataIds,
     }));
   }
   if (!isTop) await mutex;
   else {
     store[IS_APPLIED] = data[INJECT_INTO] !== 'off'; // isApplied at the time of GetInjected
   }
-  // Ensuring top script's menu wins over a per-frame menu with different commands
-  const commands = store.commands = Object.assign(data.menus, !isTop && store.commands);
-  const idMapAllFrames = store.idMap;
-  const idMapMain = idMapAllFrames[0] || (idMapAllFrames[0] = {});
-  const idMapOld = idMapAllFrames[frameId] || (idMapAllFrames[frameId] = {});
-  const idMap = data[IDS]::mapEntry(null, (id, val) => val !== idMapOld[id] && id);
-  const ids = Object.keys(idMap).map(Number);
+  let v;
+  const idMap = isTop ? idMapMain : idMapFrames;
+  const ids = Object.keys(dataIds)
+    .map(id => (v = dataIds[id]) !== idMap[id] && (idMap[id] = v, +id))
+    .filter(Boolean);
   if (ids.length) {
-    Object.assign(idMapOld, idMap);
-    // frameScripts may be appended multiple times if iframes have unique scripts
-    const { frameScripts } = store;
-    const scope = isTop ? store[SCRIPTS] : frameScripts;
+    const scope = store[SCRIPTS][isTop ? 0 : 1];
+    const { grantless } = data;
     const metas = data[SCRIPTS]?.filter(({ props: { id } }) => ids.includes(id))
       || (Object.assign(data, await sendCmdDirectly('GetData', { ids })))[SCRIPTS];
     metas.forEach(script => {
-      loadScriptIcon(script, data);
       const { id } = script.props;
       const state = idMap[id];
+      const content = script.c = state === CONTENT && state;
       const more = state === MORE;
       const badRealm = state === ID_BAD_REALM;
       const renderedScript = scope.find(({ props }) => props.id === id);
       if (renderedScript) script = renderedScript;
       else if (isTop || !(id in idMapMain)) {
-        scope.push(script);
+        script = scope[scope.push(script) - 1]; // get the Vue-proxified script
         if (isTop) { // removing script from frameScripts if it ran there before the main frame
+          // frameScripts may be appended multiple times if iframes have unique scripts
+          const frameScripts = store[SCRIPTS][1];
           const i = frameScripts.findIndex(({ props }) => props.id === id);
           if (i >= 0) frameScripts.splice(i, 1);
         }
       }
-      script.runs = state === CONTENT || state === PAGE;
+      script.runs = content || state === PAGE;
       script.pageUrl = url; // each frame has its own URL
       script.failed = badRealm || state === ID_INJECTING || more;
+      if (grantless && (v = grantless[id]) && delete v.window && (v = Object.keys(v).join(', '))) {
+        script.grantless = i18n('hintGrantless', v.length > 50 ? v.slice(0, 50) + '...' : v);
+      }
       script[MORE] = more;
       script.syntax = state === ID_INJECTING;
       if (badRealm && !store.injectionFailure) {
         store.injectionFailure = { fixable: data[INJECT_INTO] === PAGE };
       }
+      loadScriptIcon(script, data);
     });
   }
-  for (const scriptId in commands) {
-    const scriptCommands = commands[scriptId];
-    for (const id in scriptCommands) {
-      loadCommandIcon(scriptCommands[id], store);
+  for (const id in data.menus) {
+    const cmds = data.menus[id];
+    const scope = store[SCRIPTS][isTop || id in idMapMain ? 0 : 1];
+    const script = scope.find(({ props }) => props.id === +id) || {};
+    const menu = script.cmds ||= new Map();
+    for (const cmd in cmds) {
+      v = cmds[cmd];
+      menu.set(cmd, v); // updating the command with new text/icon
+      loadCommandIcon(v, store);
     }
   }
   if (isTop) mutexResolve(); // resolving at the end after all `await` above are settled
@@ -95,7 +102,7 @@ async function setPopup(data, { [kFrameId]: frameId, url }) {
     hPrev = Math.max(innerHeight, 100); // ignore the not-yet-resized popup e.g. in Firefox
     window.onresize = onResize;
     // Mobile browsers show the popup maximized to the entire screen, no resizing
-    if (isTouch && hPrev > document.body.clientHeight) onResize();
+    if (isFullscreenPopup && hPrev > document.body.clientHeight) onResize();
   }
 }
 
@@ -109,8 +116,11 @@ function initMutex(delay = 100) {
 
 async function initialize() {
   initMutex();
+  idMapMain = {};
+  idMapFrames = {};
   Object.assign(store, emptyStore());
-  let [cached, data, [failure, reason, reason2]] = await sendCmdDirectly('InitPopup');
+  let [cached, data, [failure, reason, reason2]] = BGDATA.popup
+    || await sendCmdDirectly('InitPopup');
   if (!reason) {
     failure = '';
   } else if (reason === INJECT_INTO) {
@@ -129,7 +139,7 @@ async function initialize() {
     failureText: failure,
   });
   if (cached) {
-    for (const id in cached) handlers.SetPopup(...cached[id]);
+    for (const id in cached) setPopup(...cached[id]);
   }
   if (!port) {
     port = browser.runtime.connect({ name: `Popup:${cached ? 'C' : ''}:${data.tab.id}` });

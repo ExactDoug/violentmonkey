@@ -1,4 +1,4 @@
-import { HOMEPAGE_URL, INFERRED, RUN_AT_RE, SUPPORT_URL } from './consts';
+import { HOMEPAGE_URL, INFERRED, kTag, RUN_AT_RE, SUPPORT_URL } from './consts';
 import { getLocaleString } from './string';
 import { i18n, tryUrl } from './util';
 
@@ -6,6 +6,9 @@ import { i18n, tryUrl } from './util';
 const BAD_URL_CHAR = /[#/?]/g;
 /** Fullwidth range starts at 0xFF00, normal range starts at space char code 0x20 */
 const replaceWithFullWidthForm = s => String.fromCharCode(s.charCodeAt(0) - 0x20 + 0xFF00);
+const GMVALUES_RE = /^GM[_.](listValues|([gs]et|delete)Values?)$/;
+/** @param {VMScript['meta']} meta */
+export const isGmStorageGranted = meta => meta.grant.some(GMVALUES_RE.test, GMVALUES_RE);
 
 /**
  * @param {VMScript} script
@@ -68,11 +71,16 @@ export function getScriptPrettyUrl(script, displayName) {
 }
 
 export function getScriptsTags(scripts) {
-  const uniq = new Set();
-  for (const { custom: { tags } } of scripts) {
-    if (tags) tags.split(/\s+/).forEach(uniq.add, uniq);
+  // Collecting all tag arrays in a simple index
+  const all = [];
+  for (const { meta: { [kTag]: metaTags }, custom: { [kTag]: customTags } } of scripts) {
+    if (metaTags?.length) all.push(metaTags);
+    if (customTags?.length) all.push(customTags);
   }
-  return [...uniq].sort();
+  return all.length
+    // Flattening arrays + deduplicating, both in one super fast native op
+    ? [...new Set([].concat(...all))].sort()
+    : all;
 }
 
 /**

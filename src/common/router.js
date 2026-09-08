@@ -10,7 +10,7 @@ export const lastRoute = () => stack[stack.length - 1] || {};
 updateRoute();
 
 function updateRoute(noConfirm) {
-  const hash = window.location.hash.slice(1);
+  const hash = location.hash.slice(1);
   if (noConfirm || !route.confirmChange) {
     const [pathname, search = ''] = hash.split('?');
     /**
@@ -36,15 +36,16 @@ function updateRoute(noConfirm) {
 // popstate should be the first to ensure hashchange listeners see the correct lastRoute
 addEventListener('popstate', () => stack.pop());
 addEventListener('hashchange', () => updateRoute(), false);
+addEventListener('pageshow', e => e.persisted && updateRoute());
 
 export function setRoute(hash, replace, noConfirm) {
   let hashString = `${hash}`;
   if (hashString[0] !== '#') hashString = `#${hashString}`;
   if (replace) {
-    window.history.replaceState('', null, hashString);
+    history.replaceState('', null, hashString);
   } else {
     stack.push(Object.assign({}, route));
-    window.history.pushState('', null, hashString);
+    history.pushState('', null, hashString);
   }
   updateRoute(noConfirm);
 }

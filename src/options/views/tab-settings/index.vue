@@ -1,6 +1,22 @@
 <template>
   <div ref="$el" class="tab-settings" :data-show-advanced="settings.showAdvanced">
     <h1 v-text="i18n('labelSettings')"></h1>
+    <section>
+      <tooltip :content="i18n('labelHttpOnlyCookieHint')">
+        <setting-check :name="kGmCookieHttpOnly">
+          <span>{{
+            i18n('labelHttpOnlyCookie')
+          }} <ruby v-text="i18n('labelScriptOptionRequired')"/></span>
+        </setting-check>
+      </tooltip>
+      <tooltip :content="i18n('labelGmDownloadViaApiHint')">
+        <setting-check
+          :name="kGmDownloadViaApi" :label="i18n('labelGmDownloadViaApi')" ref="$dlApi"
+          :data-needs-grant="!store[kDownloads] && $dlApi?.value && !granting ? 1 : 0" />
+        <button class="ml-1" v-text="i18n('labelGrantPermission')"
+                @click="requestDownloadsPermission" />
+      </tooltip>
+    </section>
     <section class="mb-1c">
       <h3 v-text="i18n('optionPopup')"/>
       <settings-popup/>
@@ -18,8 +34,7 @@
       </div>
       <div class="ml-2c flex flex-col">
         <setting-check name="notifyUpdates" :label="i18n('labelNotifyUpdates')" />
-        <setting-check name="notifyUpdatesGlobal" :label="i18n('labelNotifyUpdatesGlobal')"
-                       class="ml-2" />
+        <setting-check name="notifyUpdatesGlobal" :label="i18n('labelNotifyUpdatesGlobal')" />
       </div>
     </section>
     <section class="mb-2c">
@@ -31,13 +46,12 @@
     </section>
     <vm-sync></vm-sync>
     <details v-for="(obj, key) in {showAdvanced: settings}" :key :open="obj[key]">
-      <summary @click.prevent="obj[key] = !obj[key]">
+      <summary class="h3" @click.prevent="obj[key] = !obj[key]">
         <!-- eslint-disable-next-line vue/no-v-text-v-html-on-component -->
         <component v-text="i18n('labelAdvanced')" class="inline-block"
                    :is="obj[key] ? 'h1' : 'h3'"/>
       </summary>
       <section class="mb-1c">
-        <h3 v-text="i18n('labelGeneral')"></h3>
         <div>
           <label>
             <locale-group i18n-key="optionUiTheme">
@@ -54,25 +68,23 @@
             <select v-for="opt in ['defaultInjectInto']" v-model="settings[opt]" :key="opt">
               <option v-for="(_, mode) in items[opt]" :key="mode" v-text="mode" />
             </select>
-            <a class="ml-1" :href="VM_HOME + 'posts/inject-into-context/'" v-bind="EXTERNAL_LINK_PROPS" v-text="i18n('learnInjectionMode')"/>
+            <a class="ml-1" :href="VM_DOCS_INJECT_INTO" v-bind="EXTERNAL_LINK_PROPS" v-text="i18n('learnInjectionMode')"/>
           </label>
-          <tooltip :content="i18n('labelXhrInjectHint')">
+          <tooltip :content="i18n('labelXhrInjectHint')" align="start">
             <setting-check name="xhrInject">
-              <locale-group i18n-key="labelXhrInject">
-                <code>page</code>
-              </locale-group> <ruby v-text="i18n('labelXhrInjectNote')"/>
+              <span v-text="i18n('labelXhrInject', '<page>')"/>
+              <ruby v-text="i18n('labelXhrInjectNote')" class="ml-1"/>
             </setting-check>
           </tooltip>
-          <label v-if="!settings.xhrInject">
-            <setting-check name="ffInject"/>
-            <tooltip :content="i18n('labelFastFirefoxInjectHint')">
-              <locale-group i18n-key="labelFastFirefoxInject">
-                <code>page</code>
-              </locale-group>
-            </tooltip>
-          </label>
+          <tooltip :content="i18n('labelFastInjectHint')" align="start">
+            <setting-check name="ffInject" :label="i18n('labelFastInject', '<page>')"
+                           :disabled="!CAN_FAST_INJECT"/>
+          </tooltip>
+          <tooltip :content="i18n('labelFirefoxPatchCspHint', ['<page>', '<wrappedJSObject>'])" align="start">
+            <setting-check name="ffCsp" :label="i18n('labelFirefoxPatchCsp')"/>
+          </tooltip>
         </div>
-        <div class="flex flex-col">
+        <div class="flex flex-col" style="align-items: flex-start">
           <locale-group i18n-key="labelExposeStatus">
             <setting-check v-for="([key, host]) in expose" :key="host"
                            :name="`expose.${key}`" class="ml-2 mr-1c">
@@ -110,9 +122,12 @@
 
 <script>
 import { i18n } from '@/common';
-import { KNOWN_INJECT_INTO, VM_HOME } from '@/common/consts';
+import browser from '@/common/browser';
+import { kDownloads, KNOWN_INJECT_INTO, VM_DOCS_INJECT_INTO } from '@/common/consts';
 import options from '@/common/options';
-import { kScriptTemplate, kUpdateEnabledScriptsOnly } from '@/common/options-defaults';
+import {
+  kGmCookieHttpOnly, kGmDownloadViaApi, kScriptTemplate, kUpdateEnabledScriptsOnly,
+} from '@/common/options-defaults';
 import { keyboardService } from '@/common/keyboard';
 import { EXTERNAL_LINK_PROPS, focusMe, getActiveElement } from '@/common/ui';
 import { hookSettingsForUI } from '@/common/ui/util';
@@ -128,14 +143,18 @@ const items = {
     light: i18n('optionUiThemeLight'),
   },
   xhrInject: value => value,
+  [kGmDownloadViaApi]: value => value,
 };
+const ctrlS = () => getActiveElement().dispatchEvent(new Event('ctrl-s'));
+const CAN_FAST_INJECT = __.MV3 || browser.contentScripts;
 </script>
 
 <script setup>
+import { noop, sendCmdDirectly } from '@/common';
 import { onActivated, onDeactivated, reactive, ref, watch } from 'vue';
 import Tooltip from 'vueleton/lib/tooltip';
-import SettingCheck from '@/common/ui/setting-check';
 import LocaleGroup from '@/common/ui/locale-group';
+import SettingCheck from '@/common/ui/setting-check';
 import SettingText from '@/common/ui/setting-text';
 import SettingsPopup from '@/common/ui/settings-popup.vue';
 import VmImport from './vm-import';
@@ -145,29 +164,48 @@ import VmSync from './vm-sync';
 import VmEditor from './vm-editor';
 import VmBlacklist from './vm-blacklist';
 import VmDateInfo from './vm-date-info';
+import { kbdTypable } from '@/common/keyboard';
 
 const $el = ref();
+const $dlApi = ref();
+const granting = ref();
 const settings = reactive({});
 const expose = ref();
-const ctrlS = () => getActiveElement().dispatchEvent(new Event('ctrl-s'));
 let revokers;
+let dlApiInput;
 
 onActivated(() => {
   focusMe($el.value);
   revokers = [
-    keyboardService.register('ctrlcmd-s', ctrlS, { condition: 'inputFocus' }),
+    keyboardService.register('ctrlcmd-KeyS', ctrlS, { condition: kbdTypable }),
     ...hookSettingsForUI(items, settings, watch, 50),
   ];
   expose.value = Object.keys(options.get(EXPOSE)).map(k => [k, decodeURIComponent(k)]);
+  // TODO: find out why using @click on <setting-check> fires twice
+  dlApiInput = $dlApi.value.$input;
+  dlApiInput.onclick = requestDownloadsPermission;
 });
-
 onDeactivated(() => {
   revokers.forEach(r => r());
   revokers = null;
 });
+async function requestDownloadsPermission() {
+  if (dlApiInput.checked) {
+    granting.value = true;
+    store[kDownloads] ||= await browser.permissions.request({
+      permissions: [kDownloads]
+    }).catch(noop);
+    granting.value = false;
+    if (!__.MV3 && !browser.permissions.onAdded) {
+      sendCmdDirectly('SetPermissions', { [kDownloads]: store[kDownloads] });
+    }
+  }
+}
 </script>
 
 <style>
+@import '../../vars.css';
+
 .tab-settings {
   overflow-y: auto;
   input[type="number"] {
@@ -177,16 +215,17 @@ onDeactivated(() => {
   h1 {
     margin-top: 0;
   }
-  summary {
+  h3 {
+    margin: 0;
+  }
+  summary.h3 {
     cursor: pointer;
-    margin-left: -1em;
+    margin-top: $tabPadTopY !important;
+    padding-left: calc($tabPadX / 2);
     user-select: none;
     &:focus > *,
     &:hover > * {
       text-decoration: underline;
-    }
-    h3 {
-      margin-top: 0;
     }
   }
   ruby {
@@ -196,6 +235,20 @@ onDeactivated(() => {
     width: 16px;
     height: 16px;
     fill: var(--fg);
+  }
+  section {
+    display: flex;
+    flex-flow: column;
+    > .flex-col > *,
+    > :not(h3):not([class*="flex"]):not(.setting-text) {
+      align-self: flex-start;
+    }
+  }
+  [data-needs-grant="1"] {
+    text-decoration: line-through;
+  }
+  [data-needs-grant="0"] + button {
+    display: none;
   }
 }
 </style>

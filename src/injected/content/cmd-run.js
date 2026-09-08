@@ -1,21 +1,21 @@
-import bridge, { addHandlers, onScripts } from './bridge';
+import * as bridge from './bridge';
 import { sendSetPopup } from './gm-api-content';
 import { nextTask, sendCmd } from './util';
 
 const getPersisted = describeProperty(PageTransitionEvent[PROTO], 'persisted').get;
 let pending = topRenderMode === 2; // wait until reified if pre-rendered
 let resolveOnReify;
-let runningIds;
+let runningIds = [];
 let sent;
 
-onScripts.push(() => {
-  addHandlers({ Run });
-  runningIds = [];
+bridge.onScripts.push(() => {
+  bridge.addHandlers({ Run });
 });
 on('pageshow', onShown);
 if (pending) {
   document::on('prerenderingchange', onShown.bind(null), { once: true });
-  bridge[REIFY] = new Promise(resolve => (resolveOnReify = resolve));
+  // eslint-disable-next-line no-import-assign
+  bridge.reify = new Promise(resolve => (resolveOnReify = resolve));
 }
 
 function onShown(evt) {
@@ -23,7 +23,7 @@ function onShown(evt) {
   if (evt.isTrusted) {
     if (!this) {
       topRenderMode = 3; // eslint-disable-line no-global-assign
-      sent = bridge[REIFY] = false;
+      sent = bridge.reify = false; // eslint-disable-line no-import-assign
       resolveOnReify();
       report();
       topRenderMode = 4; // eslint-disable-line no-global-assign
@@ -35,7 +35,7 @@ function onShown(evt) {
 
 export function Run(id, realm) {
   safePush(runningIds, id);
-  bridge[IDS][id] = realm || PAGE;
+  bridge.ids[id] = realm || PAGE;
   if (!pending) pending = report(2);
 }
 

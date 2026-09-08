@@ -1,25 +1,25 @@
-import { browserWindows, getActiveTab, makePause, noop, sendTabCmd } from '@/common';
+import { browserWindows, getActiveTab, i18n, makePause, noop, sendTabCmd } from '@/common';
 import { getDomain } from '@/common/tld';
-import { addOwnCommands, addPublicCommands, commands } from './init';
+import { addOwnCommands, addPublicCommands, commands, init } from './init';
 import { getOption } from './options';
+import sessionData, { flushSession, kTabOpeners, tabOpeners } from './session-data';
 import { testScript } from './tester';
-import { CHROME, FIREFOX } from './ua';
+import { CHROME } from './ua';
 import { vetUrl } from './url';
 
-const openers = {};
 const openerTabIdSupported = !IS_FIREFOX // supported in Chrome
-  || !!(window.AbortSignal && browserWindows); // and FF57+ except mobile
+  || !!(global.AbortSignal && browserWindows); // and FF57+ except mobile
 const EDITOR_ROUTE = extensionOptionsPage + ROUTE_SCRIPTS + '/'; // followed by id
-export const NEWTAB_URL_RE = re`/
+export const NEWTAB_URL_RE = regex`
 ^(
   about:(home|newtab) # Firefox
-  | (chrome|edge):\/\/(
-    newtab\/ # Chrome, Edge
-    | startpageshared\/ # Opera
-    | vivaldi-webui\/startpage # Vivaldi
+  | (chrome|edge)://(
+    newtab/ # Chrome, Edge
+    | startpageshared/ # Opera
+    | vivaldi-webui/startpage # Vivaldi
   )
 )$
-/x`;
+`;
 /** @returns {string|number} documentId for a pre-rendered top page, frameId otherwise */
 export const getFrameDocId = (isTop, docId, frameId) => (
   isTop === 2 && docId || frameId
@@ -40,6 +40,7 @@ export const getTabUrl = tab => (
 );
 export const tabsOnUpdated = browser.tabs.onUpdated;
 export const tabsOnRemoved = browser.tabs.onRemoved;
+export const tabsOnActivated = browser.tabs.onActivated;
 export let injectableRe = /^(https?|file|ftps?):/;
 export let fileSchemeRequestable;
 let cookieStorePrefix;
@@ -55,6 +56,7 @@ try {
   });
 }
 
+/** @namespace Commands */
 addOwnCommands({
   GetTabDomain(url) {
     const host = url && new URL(url).hostname;
@@ -76,6 +78,7 @@ addOwnCommands({
   OpenDashboard: openDashboard,
 });
 
+/** @namespace Commands */
 addPublicCommands({
   /** @return {Promise<{ id: number } | chrome.tabs.Tab>} new tab is returned for internal calls */
   async TabOpen({
@@ -126,10 +129,7 @@ addPublicCommands({
     if (isInternal
         && url.startsWith(EDITOR_ROUTE)
         && browserWindows
-        && getOption('editorWindow')
-        /* cookieStoreId in windows.create() is supported since FF64 https://bugzil.la/1393570
-         * and a workaround is too convoluted to add it for such an ancient version */
-        && (!storeId || FIREFOX >= 64)) {
+        && getOption('editorWindow')) {
       const wndOpts = {
         url,
         incognito: canOpenIncognito && incognito,
@@ -158,18 +158,26 @@ addPublicCommands({
         },
       });
     } catch (err) {
-      const m = err.message;
+      const m = err.message || '';
       if (m.startsWith('Illegal to set private')) storeId = null;
       else if (m.startsWith('No tab')) srcTab.id = null;
       else if (m.startsWith('No window')) windowId = null;
       else if (m.startsWith('Tabs cannot be edited')) await makePause(100);
-      else throw err; // TODO: put in storage and show in UI
+      else {
+        console.error('[TabOpen error]', err);
+        commands.Notification({
+          text: m || String(err),
+          title: i18n('extName') + ' - TabOpen Error',
+        });
+        throw err;
+      }
     }
     if (active && newTab[kWindowId] !== windowId) {
       await browserWindows?.update(newTab[kWindowId], { focused: true });
     }
     if (!isInternal && srcTab.id != null) {
-      openers[newTab.id] = srcTab.id;
+      tabOpeners[newTab.id] = srcTab.id;
+      if (__.MV3) flushSession(kTabOpeners, tabOpeners);
     }
     return isInternal ? newTab : { id: newTab.id };
   },
@@ -184,11 +192,13 @@ addPublicCommands({
   },
 });
 
-tabsOnRemoved.addListener((id) => {
-  const openerId = openers[id];
+tabsOnRemoved.addListener(async (id) => {
+  if (init) await sessionData;
+  const openerId = tabOpeners[id];
   if (openerId >= 0) {
     sendTabCmd(openerId, 'TabClosed', id);
-    delete openers[id];
+    delete tabOpeners[id];
+    if (__.MV3) flushSession(kTabOpeners, tabOpeners);
   }
 });
 
@@ -196,7 +206,7 @@ tabsOnRemoved.addListener((id) => {
   // FF68+ can't fetch file:// from extension context but it runs content scripts in file:// tabs
   const fileScheme = IS_FIREFOX
     || await new Promise(r => chrome.extension.isAllowedFileSchemeAccess(r));
-  fileSchemeRequestable = FIREFOX < 68 || !IS_FIREFOX && fileScheme;
+  fileSchemeRequestable = !IS_FIREFOX && fileScheme;
   // Since users in FF can override UA we detect FF 90 via feature
   if (IS_FIREFOX && [].at || CHROME >= 88) {
     injectableRe = fileScheme ? /^(https?|file):/ : /^https?:/;
@@ -205,11 +215,12 @@ tabsOnRemoved.addListener((id) => {
   }
 })();
 
-export async function forEachTab(callback) {
+export async function forEachTab(callback, ...args) {
   const tabs = await browser.tabs.query({});
   let i = 0;
   for (const tab of tabs) {
-    callback(tab);
+    if (callback === sendTabCmd) callback(tab.id, ...args);
+    else callback(tab, ...args);
     i += 1;
     // we'll run at most this many tabs in one event loop cycle
     // because hundreds of tabs would make our extension process unresponsive,

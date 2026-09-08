@@ -1,6 +1,5 @@
 import { isEmpty } from '../util';
-import bridge from './bridge';
-import { commands, storages } from './store';
+import * as bridge from './bridge';
 import { onTabCreate } from './tabs';
 import { onRequestCreate, onRequestInitError } from './requests';
 import { createNotification } from './notifications';
@@ -15,6 +14,7 @@ export const GM4_ALIAS = createNullObj();
 /** Context-bound + async when used as GM.xxx */
 export const GM_API_CTX_GM4ASYNC = {
   __proto__: null,
+  GM_cookie: gmCookieInvoker,
   /** @this {GMContext} */
   GM_deleteValue(key) {
     return dumpValue(this, false, [key]);
@@ -25,14 +25,14 @@ export const GM_API_CTX_GM4ASYNC = {
   },
   /** @this {GMContext} */
   GM_getValue(key, def) {
-    const raw = storages[this.id][key];
+    const raw = bridge.storages[this.id][key];
     return resolveOrReturn(this, raw ? decodeValue(raw) : def);
   },
   /** @this {GMContext} */
   GM_getValues(what) {
     const res = {};
     const isArr = arrayIsArray(what);
-    const values = storages[this.id];
+    const values = bridge.storages[this.id];
     for (const key of isArr ? what : objectKeys(what)) {
       const raw = values[key];
       if (raw) setOwnProp(res, key, decodeValue(raw));
@@ -42,7 +42,7 @@ export const GM_API_CTX_GM4ASYNC = {
   },
   /** @this {GMContext} */
   GM_listValues() {
-    return resolveOrReturn(this, objectKeys(storages[this.id]));
+    return resolveOrReturn(this, objectKeys(bridge.storages[this.id]));
   },
   /** @this {GMContext} */
   GM_setValue(key, val) {
@@ -70,8 +70,6 @@ export const GM_API_CTX_GM4ASYNC = {
     }
     assign(opts, {
       [kResponseType]: 'blob',
-      data: null,
-      method: 'GET',
       overrideMimeType: 'application/octet-stream',
     });
     return onRequestCreate(opts, this, name);
@@ -97,7 +95,7 @@ export const GM_API_CTX = {
   GM_addValueChangeListener(key, fn) {
     if (!isString(key)) key = `${key}`;
     if (!isFunction(fn)) return;
-    const hooks = ensureNestedProp(changeHooks, this.id, key);
+    const hooks = (changeHooks[this.id] ||= createNullObj())[key] ||= createNullObj();
     const i = objectValues(hooks)::indexOf(fn);
     let listenerId = i >= 0 && objectKeys(hooks)[i];
     if (!listenerId) {
@@ -113,7 +111,7 @@ export const GM_API_CTX = {
   GM_removeValueChangeListener(listenerId) {
     const keyHooks = changeHooks[this.id];
     if (!keyHooks) return;
-    if (process.env.DEBUG) throwIfProtoPresent(keyHooks);
+    if (__.DEBUG) throwIfProtoPresent(keyHooks);
     for (const key in keyHooks) { /* proto is null */// eslint-disable-line guard-for-in
       const hooks = keyHooks[key];
       if (listenerId in hooks) {
@@ -138,7 +136,7 @@ export const GM_API_CTX = {
     if (!text) throw new SafeError('Menu caption text is required!');
     const { id } = this;
     const key = opts.id || text;
-    const cmd = ensureNestedProp(commands, id, key);
+    const cmd = (bridge.commands[id] ||= createNullObj())[key] ||= createNullObj();
     cmd.cb = cb;
     cmd.text = text;
     bridge.post('RegisterMenu', { id, key, val: opts });
@@ -147,7 +145,7 @@ export const GM_API_CTX = {
   /** @this {GMContext} */
   GM_unregisterMenuCommand(key) {
     const { id } = this;
-    const hub = commands[id];
+    const hub = bridge.commands[id];
     if (hub && (hub[key] || (key = findCommandIdByText(key, hub)))) {
       delete hub[key];
       bridge.post('UnregisterMenu', { id, key });
@@ -170,7 +168,7 @@ export const GM_API = {
    * @returns {HTMLElement} it also has .then() so it should be compatible with TM
    */
   GM_addElement(parent, tag, attributes) {
-    return isString(parent)
+    return !parent ? null : isString(parent)
       ? webAddElement(null, parent, tag)
       : webAddElement(parent, tag, attributes);
   },
@@ -194,19 +192,23 @@ export const GM_API = {
   GM_log: logging.log,
 };
 
+/** @this {GMContext} */
+export function gmCookieInvoker(cmd, hasResult, opts, cb) {
+  opts = nullObjFrom(opts);
+  opts.scriptId = this.id;
+  if (this.async) return bridge.promise(cmd, opts);
+  if (cb) return bridge.call(cmd, opts, null, hasResult ? cb : (res, err) => cb(err));
+  bridge.post(cmd, opts);
+}
+
 function webAddElement(parent, tag, attrs) {
-  let el;
-  let errorInfo;
-  bridge.call('AddElement', { tag, attrs }, parent, function _(res) {
+  let el, err;
+  bridge.call('AddElement', { tag, attrs }, parent, function _(res, cbErr) {
     el = this;
-    errorInfo = res;
-  }, 'cbId');
+    err = cbErr;
+  });
   // DOM error in content script can't be caught by a page-mode userscript so we rethrow it here
-  if (errorInfo) {
-    const err = new SafeError(errorInfo[0]);
-    err.stack += `\n${errorInfo[1]}`;
-    throw err;
-  }
+  if (err) throw err;
   /* A Promise polyfill is not actually necessary because DOM messaging is synchronous,
      but we keep it for compatibility with GM_addStyle in VM of 2017-2019
      https://github.com/violentmonkey/violentmonkey/issues/217
@@ -233,11 +235,10 @@ function getResource(context, name, isBlob, isBlobAuto) {
     // data URIs aren't cached in bridge, so we'll send them
     const isData = key::slice(0, 5) === 'data:';
     const bucketKey = isBlob == null ? 0 : 1 + (isBlob = isBlobAuto ? !isData : isBlob);
-    res = isData && isBlob === false || ensureNestedProp(resCache, bucketKey, key, false);
-    if (!res) {
-      res = bridge.call('GetResource', { id, isBlob, key, raw: isData && key });
-      ensureNestedProp(resCache, bucketKey, key, res);
-    }
+    const bucket = resCache[bucketKey] ||= createNullObj();
+    res = isData && isBlob === false || (
+      bucket[key] ||= bridge.call('GetResource', { id, isBlob, key, raw: isData && key })
+    );
   }
   return resolveOrReturn(context, res === true ? key : res);
 }

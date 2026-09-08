@@ -3,28 +3,52 @@ import { getActiveElement } from '@/common/ui';
 
 export * from '@violentmonkey/shortcut';
 
+let prevBitState = 0;
 export const keyboardService = new KeyboardService();
+export const kbdEnterable = 'canEnter';
+export const kbdTypable = 'canType';
+export const kbdNavigatable = 'canNav';
+/** @param {HTMLElement} el */
+export const isInput = ({ localName: n } = {}) =>
+  n === 'button' ? ENTERABLE
+    : n === 'input' ? ENTERABLE + TYPABLE
+      : n === 'select' || n === 'textarea' ? ENTERABLE + TYPABLE + NAVIGATABLE
+        : 0;
+const ENTERABLE = 1;
+const TYPABLE = 2;
+const NAVIGATABLE = 4;
+const BIT_CTX = {
+  [ENTERABLE]: kbdEnterable,
+  [TYPABLE]: kbdTypable,
+  [NAVIGATABLE]: kbdNavigatable,
+};
 
 bindKeys();
 
-export function isInput({ localName: n } = {}) {
-  return n === 'input' || n === 'button' || n === 'select' || n === 'textarea';
-}
-
-function handleFocus(e) {
-  if (isInput(e.target)) {
-    keyboardService.setContext('inputFocus', true);
+/**
+ * @param {FocusEvent} evt
+ * @param {boolean} [state]
+ * @return {number}
+ */
+function handleFocus(evt, state = true) {
+  const type = isInput(evt.target);
+  for (const bit in BIT_CTX) {
+    const bitState = +state && (type & bit);
+    if (bitState !== (prevBitState & bit)) {
+      keyboardService.setContext(BIT_CTX[bit], !!bitState);
+      if (state) prevBitState |= bit; else prevBitState &= ~bit;
+    }
   }
+  return type;
 }
 
-function handleBlur(e) {
-  if (isInput(e.target)) {
-    keyboardService.setContext('inputFocus', false);
-  } else {
+/** @param {FocusEvent} evt */
+function handleBlur(evt) {
+  if (evt.relatedTarget ? !isInput(evt.target) : !handleFocus(evt, false)) {
     const event = new CustomEvent('tiphide', {
       bubbles: true,
     });
-    e.target.dispatchEvent(event);
+    evt.target.dispatchEvent(event);
   }
 }
 
@@ -41,7 +65,7 @@ function bindKeys() {
   keyboardService.register('enter', () => {
     getActiveElement().click();
   }, {
-    condition: '!inputFocus',
+    condition: '!' + kbdEnterable,
   });
 }
 

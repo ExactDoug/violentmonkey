@@ -1,6 +1,6 @@
 /* eslint-disable max-classes-per-file */
-import { escapeStringForRegExp, getScriptPrettyUrl } from '@/common';
-import { ERR_BAD_PATTERN, BLACKLIST, BLACKLIST_NET, ERRORS } from '@/common/consts';
+import { getScriptPrettyUrl } from '@/common';
+import { ERR_BAD_PATTERN, ESC_GLOB_RE, BLACKLIST, BLACKLIST_NET, ERRORS } from '@/common/consts';
 import initCache from '@/common/cache';
 import { getPublicSuffix } from '@/common/tld';
 import { hookOptionsInit } from './options';
@@ -15,14 +15,16 @@ const cacheMat = initCache({ lifetime: 60 * 60e3 });
 const cacheInc = initCache({ lifetime: 60 * 60e3 });
 const cacheResultMat = initCache({ lifetime: 60e3 });
 const cacheResultInc = initCache({ lifetime: 60e3 });
+export const ERR_GLOB_HOST_SUFFIX = 'top-level domain with "*" should be replaced with ".tld" or @include';
+const RE_GLOB_HOST_SUFFIX = /\*[^.]*\.?$/;
 /** Simple matching for valid patterns */
-const RE_MATCH_PARTS = re`/^
-  (\*|http([s*])?|file|ftp|urn):\/\/
-  ([^/]*)\/
+const RE_MATCH_PARTS = regex({ disable: { n: true } })`^
+  (\*|http([s*])?|file|ftp|urn)://
+  ([^\/]*)/
   (.*)
-/x`;
+`;
 /** Resilient matching for broken patterns allows reporting errors with a helpful message */
-const RE_MATCH_BAD = re`/^
+const RE_MATCH_BAD = regex({ disable: { n: true } })`^
   (
     \*|
     # allowing the incorrect http* scheme which is the same as *
@@ -34,11 +36,13 @@ const RE_MATCH_BAD = re`/^
     ([^:]*?)(?=:)
   )
   # detecting a partially missing ://
-  (:(?:\/(?:\/)?)?)?
-  ([^/]*)
+  (:(?:/(?:/)?)?)?
+  ([^\/]*)
   # detecting a missing / for path
-  (?:\/(.*))?
-/x`;
+  (?:/(.*))?
+`;
+/** Case-sensitive because it's an internal URL */
+const RE_ABOUT_URL_PARTS = /^(about):()(.*)/;
 /** Simpler matching for a valid URL */
 const RE_URL_PARTS = /^([^:]*):\/\/([^/]*)\/(.*)/;
 const RE_STR_ANY = '(?:|[^:/]*?\\.)';
@@ -77,10 +81,20 @@ hookOptionsInit((changes) => {
 export class MatchTest {
   constructor(rule, scheme, httpMod, host, path) {
     const isWild = scheme === '*' || httpMod === '*';
+    const isWildHost = host === '*';
     this.scheme = isWild ? 'http' : scheme;
     this.scheme2 = isWild ? 'https' : null;
-    this.host = host === '*' ? null : hostMatcher(host);
+    this.host = isWildHost ? null : hostMatcher(host);
     this.path = path === '*' ? null : pathMatcher(path);
+    if (!isWildHost && host.match(RE_GLOB_HOST_SUFFIX)) {
+      this.err = `${ERR_BAD_PATTERN} ${rule}: ${ERR_GLOB_HOST_SUFFIX} /^${
+        scheme.replace(ESC_GLOB_RE, '\\$&').replace(/\*/g, '[^:]*?')
+      }://${
+        host.replace(ESC_GLOB_RE, '\\$&').replace(/\*/g, '[^/]*?')
+      }/${
+        str2RE(path)
+      }$/`;
+    }
   }
 
   test() {
@@ -99,12 +113,15 @@ export class MatchTest {
     if (rule === '<all_urls>') return matchAlways; // checking it second as it's super rare
     // Report failed parts in detail
     parts = rule.match(RE_MATCH_BAD);
-    parts = !parts ? '' : (
-      (parts[3] != null ? `${parts[3] ? 'unknown' : 'missing'} scheme, ` : '')
-      + (parts[4] !== '://' ? 'missing "://", ' : '')
-      || (parts[6] == null ? 'missing "/" for path, ' : '')
-    ).slice(0, -2) + ' in ';
-    throw `${ERR_BAD_PATTERN} ${parts}${rule}`;
+    throw `${ERR_BAD_PATTERN} ${rule}: ${!parts ? '' : [
+      parts[3] != null && `${parts[3] ? 'unknown' : 'missing'} scheme`,
+      parts[4] !== '://' && 'missing "://"',
+      parts[5] !== '*' && parts[5].match(RE_GLOB_HOST_SUFFIX) && ERR_GLOB_HOST_SUFFIX,
+      parts[6] == null && 'missing "/" for path',
+    ].filter(Boolean)
+      .map((s, i, arr) => (arr.length > 1 ? (i + 1) + ') ' : '') + s)
+      .join(', ')
+    }`;
   }
 }
 
@@ -154,8 +171,8 @@ export function testerBatch(arr) {
 function setContext(url) {
   curUrl = url;
   [, curScheme, curHost, curTail] = url
-    ? url.match(RE_URL_PARTS)
-    : ['', '', '', '']; // parseMetaWithErrors uses an empty url for tests
+    && (url.match(RE_URL_PARTS) || url.charCodeAt(0) === 97/*a*/ && url.match(RE_ABOUT_URL_PARTS))
+    || ['', '', '', '']; // parseMetaWithErrors uses an empty url for tests
   urlResultsMat = url ? (cacheResultMat.get(url) || cacheResultMat.put(url, {})) : null;
   urlResultsInc = url ? (cacheResultInc.get(url) || cacheResultInc.put(url, {})) : null;
 }
@@ -229,7 +246,8 @@ function testRules(url, script, ...list) {
                 : err;
               batchErrors.push(err);
             }
-          } else if (url && (urlResults[rule] = +!!m.test(url))) {
+          }
+          if (url && m.test && (urlResults[rule] = +!!m.test(url))) {
             return true;
           }
         }
@@ -240,7 +258,7 @@ function testRules(url, script, ...list) {
 }
 
 function str2RE(str) {
-  return escapeStringForRegExp(str).replace(/\*/g, '.*?');
+  return str.replace(ESC_GLOB_RE, '\\$&').replace(/\*/g, '.*?');
 }
 
 function autoReg(str) {
@@ -311,7 +329,7 @@ function CreateBlacklist() {
   function reset(value) {
     const errors = [];
     testerBatch(true);
-    if (process.env.DEBUG) {
+    if (__.DEBUG) {
       console.info('Reset blacklist:', value);
     }
     // XXX compatible with {Array} list in v2.6.1-

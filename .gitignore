@@ -1,10 +1,9 @@
-/dist/
+/dist*/
 node_modules/
 *.log
 .eslintcache
 /stats.json
 /tmp/
-/dist-assets/
-.eslintcache
 .env
+.worktrees/
 /dev-resources/

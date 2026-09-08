@@ -1,8 +1,9 @@
 <template>
   <div class="tab-installed" ref="scroller">
-    <div v-if="store.canRenderScripts">
+    <div v-if="store.canRenderScripts"
+         v-show="!store.title /* edit::onActivated + onDeactivated */">
       <header class="flex">
-        <template v-if="!showRecycle">
+        <div v-if="!showRecycle">
           <div class="btn-group">
             <Dropdown
               v-model="state.menuNew"
@@ -27,7 +28,7 @@
               </a>
             </Tooltip>
           </div>
-          <div v-if="state.filteredScripts.length" class="btn-group">
+          <div v-if="filteredScripts.length" class="btn-group filtered">
             <a
               v-for="({ icon, num }, key) in batchActions" :key
               class="btn-ghost"
@@ -43,76 +44,87 @@
               <sub v-text="num" v-if="num" />
               <span class="ml-1" v-if="state.batchAction.action === key">❗</span>
             </a>
-            <div class="btn-hint subtle" v-text="i18n('hintForBatchAction', `${state.filteredScripts.length}`)"></div>
+            <Tooltip :content="state.sizes" placement="bottom">
+              <div class="btn-hint subtle"
+                   v-text="i18n('hintForBatchAction', `${filteredScripts.length}`)"
+                   :data-size="state.size"/>
+            </Tooltip>
             <Tooltip :content="i18n('buttonUndo')" placement="bottom" align="start">
               <a v-if="state.batchAction.undo" class="btn-ghost" tabindex="0" @click.prevent="state.batchAction.undo">
                 <Icon name="undo" />
               </a>
             </Tooltip>
           </div>
-        </template>
-        <div v-else class="ml-2" v-text="i18n('headerRecycleBin')" />
-        <div class="flex-auto"></div>
-        <span class="ml-1">{{ i18n('sortOrder') }}
-          <select :value="filters.sort" @change="handleOrderChange" class="h-100">
-            <option
-              v-for="({text, title}, name) in sortModes"
-              v-text="text"
-              :title
-              :key="name"
-              :value="name">
-            </option>
-          </select>
-        </span>
-        <Dropdown align="right" class="filter-sort">
-          <Tooltip :content="i18n('labelSettings')" placement="bottom">
-            <a class="btn-ghost" tabindex="0">
-              <Icon name="cog" />
+        </div>
+        <Tooltip v-else :content="state.sizes" :disabled="!state.sizes" placement="bottom">
+          <div class="ml-2" v-text="i18n('headerRecycleBin')" :data-size="state.size" />
+        </Tooltip>
+        <div>
+          <!-- form and id are required for the built-in autocomplete using entered values -->
+          <form class="filter-search hidden-xs" @submit.prevent>
+            <label>
+              <input
+                type="search"
+                :class="{'has-error': state.search.error}"
+                :title="state.search.error"
+                :placeholder="i18n('labelSearchScript')"
+                v-model="state.search.value"
+                ref="refSearch"
+                id="installed-search">
+              <Icon name="search" />
+            </label>
+          </form>
+          <Dropdown align="right">
+            <a class="btn-ghost" tabindex="0" :class="{'has-error': state.search.error}">
+              <Icon name="question"></Icon>
             </a>
-          </Tooltip>
-          <template #content>
-            <div v-show="currentSortCompare">
-              <SettingCheck name="filters.showEnabledFirst"
-                :label="i18n('optionShowEnabledFirst')" />
-            </div>
-            <div>
-              <SettingCheck name="filters.showOrder" :label="i18n('labelShowOrder')" />
-            </div>
-            <div>
-              <SettingCheck name="filters.showVisit" :label="i18n('labelShowVisited')" />
-            </div>
-            <div class="mr-2c">
-              <SettingCheck name="filters.viewTable" :label="i18n('labelViewTable')" />
-              <SettingCheck name="filters.viewSingleColumn" :label="i18n('labelViewSingleColumn')" />
-            </div>
-          </template>
-        </Dropdown>
-        <!-- form and id are required for the built-in autocomplete using entered values -->
-        <form class="filter-search hidden-xs" @submit.prevent
-              :style="{ 'min-width': '10em', 'max-width': 5 + Math.max(20, state.search.value.length) + 'ex' }">
-          <label>
-            <input
-              type="search"
-              :class="{'has-error': state.search.error}"
-              :title="state.search.error"
-              :placeholder="i18n('labelSearchScript')"
-              v-model="state.search.value"
-              ref="refSearch"
-              id="installed-search">
-            <Icon name="search" />
-          </label>
-        </form>
-        <Dropdown align="right">
-          <a class="btn-ghost" tabindex="0" :class="{'has-error': state.search.error}">
-            <Icon name="question"></Icon>
-          </a>
-          <template #content>
-            <div class="filter-search-tooltip">
-              <div class="has-error" v-if="state.search.error" v-text="state.search.error" />
-              <div v-html="i18n('titleSearchHintV2')" />
-            </div>
-          </template>
-        </Dropdown>
+            <template #content>
+              <div class="filter-search-tooltip">
+                <div class="has-error" v-if="state.search.error" v-text="state.search.error" />
+                <div v-html="i18n('titleSearchHintV2')" />
+              </div>
+            </template>
+          </Dropdown>
+          <div class="sorter flex center-items mx-1"
+               :class="{ 'btn-ghost': collapseSorter }">
+            <Tooltip align="end"
+                     :content="i18n('sortOrder').trim() + (collapseSorter ? ' ' + (currentSort.text || '') : '')">
+              <component :is="currentSort.icon || IconSort"/>
+            </Tooltip>
+            <select :value="filters.sort" @change="handleOrderChange" class="h-100">
+              <option
+                v-for="({text, title}, name) in sortModes"
+                v-text="text"
+                :title
+                :key="name"
+                :value="name">
+              </option>
+            </select>
+          </div>
+          <Dropdown align="right" class="settings">
+            <Tooltip :content="i18n('labelSettings')" placement="bottom" align="end">
+              <a class="btn-ghost" tabindex="0">
+                <Icon name="cog" />
+              </a>
+            </Tooltip>
+            <template #content>
+              <div v-show="currentSort">
+                <SettingCheck name="filters.showEnabledFirst"
+                  :label="i18n('optionShowEnabledFirst')" />
+              </div>
+              <div>
+                <SettingCheck name="filters.showOrder" :label="i18n('labelShowOrder')" />
+              </div>
+              <div>
+                <SettingCheck name="filters.showVisit" :label="i18n('labelShowVisited')" />
+              </div>
+              <div class="mr-2c">
+                <SettingCheck name="filters.viewTable" :label="i18n('labelViewTable')" />
+                <SettingCheck name="filters.viewSingleColumn" :label="i18n('labelViewSingleColumn')" />
+              </div>
+            </template>
+          </Dropdown>
+        </div>
       </header>
       <div v-if="showRecycle" class="hint mx-1 my-1 flex flex-col">
         <span v-text="i18n('hintRecycleBin')"/>
@@ -128,15 +140,15 @@
         :data-show-order="filters.showOrder || null"
         :data-table="filters.viewTable || null">
         <ScriptItem
-          v-for="(script, index) in state.sortedScripts"
-          v-show="!state.search.rules.length || script.$cache.show !== false"
+          v-for="(script, index) in sortedScripts"
+          v-show="script.$cache.show !== 0"
           :key="script.props.id"
           :focused="selectedScript === script"
           :showHotkeys="state.showHotkeys"
           :showVisit="filters.showVisit || filters.sort.startsWith('visit')"
           :script
           :draggable
-          :visible="renderAll || index < state.batchRender.limit"
+          :visible="index < state.batchRender.limit"
           :viewTable="filters.viewTable"
           :hotkeys="scriptHotkeys"
           :activeTags
@@ -154,6 +166,7 @@
       <KeepAlive :key="store.route.hash" :max="5">
       <edit
         v-if="state.script"
+        :dirty="state.dirty"
         :initial="state.script"
         :initial-code="state.code"
         :read-only="!!state.script.config.removed"
@@ -166,32 +179,49 @@
 
 <script setup>
 import { computed, reactive, nextTick, onMounted, watch, ref, onBeforeUnmount } from 'vue';
-import { i18n, sendCmdDirectly, debounce, ensureArray, makePause, trueJoin } from '@/common';
+import Dropdown from 'vueleton/lib/dropdown';
+import Tooltip from 'vueleton/lib/tooltip';
+import { i18n, sendCmdDirectly, debounce, ensureArray, trueJoin, formatByteLength, readBlob } from '@/common';
 import { INFERRED } from '@/common/consts';
 import handlers from '@/common/handlers';
 import options from '@/common/options';
-import { EXTERNAL_LINK_PROPS, getActiveElement, isTouch, showConfirmation, showMessage, vFocus } from '@/common/ui';
 import hookSetting from '@/common/hook-setting';
 import { forEachKey } from '@/common/object';
 import { setRoute, lastRoute } from '@/common/router';
-import { keyboardService, handleTabNavigation } from '@/common/keyboard';
-import { TAB_SETTINGS } from '@/common/safe-globals';
+import { keyboardService, handleTabNavigation, kbdTypable, kbdNavigatable } from '@/common/keyboard';
 import { loadData } from '@/options';
-import Dropdown from 'vueleton/lib/dropdown';
-import Tooltip from 'vueleton/lib/tooltip';
-import SettingCheck from '@/common/ui/setting-check';
+import { TAB_SETTINGS } from '@/common/safe-globals'; // added as a banner but Vue needs an import
+import { EXTERNAL_LINK_PROPS, getActiveElement, isTouch, showConfirmation, showMessage, vFocus } from '@/common/ui';
 import Icon from '@/common/ui/icon';
-import { customCssElem, findStyleSheetRules } from '@/common/ui/style';
+import IconAlpha from '~icons/mdi/sort-alphabetical-ascending';
+import IconAlphaDown from '~icons/mdi/sort-alphabetical-descending';
+import IconCalendar from '~icons/mdi/sort-calendar-ascending';
+import IconCalendarDown from '~icons/mdi/sort-calendar-descending';
+import IconClock from '~icons/mdi/sort-clock-ascending-outline';
+import IconClockDown from '~icons/mdi/sort-clock-descending-outline';
+import IconSmallBig from '~icons/tabler/sort-ascending-small-big';
+import IconBigSmall from '~icons/tabler/sort-descending-small-big';
+import IconSort from '~icons/mdi/sort-ascending';
+import IconSortDown from '~icons/mdi/sort-descending';
+import IconUser from '~icons/tdesign/user-arrow-up';
+import IconUserDown from '~icons/tdesign/user-arrow-down';
+import SettingCheck from '@/common/ui/setting-check';
+import { customCssElem, onMediaWidth, NARROW_WIDTH } from '@/common/ui/style';
+import { getSortCollator } from '@/common/ui/util';
 import {
-  createSearchRules, markRemove, performSearch, runInBatch, setLocationHash, store, TOGGLE_OFF, TOGGLE_ON,
+  createSearchRules, filteredScripts, formatSizesStr, markRemove, performSearch, runInBatch, setLocationHash,
+  SIZE_TITLES, sortedScripts, store, TOGGLE_OFF, TOGGLE_ON,
 } from '../utils';
 import toggleDragging from '../utils/dragging';
 import ScriptItem from './script-item';
 import Edit from './edit';
 
+const handleNewScript = () => handleEditScript('_new');
 const NEW_LINKS = [
   [i18n('buttonNew'),
-    { tabIndex: 0, onclick: () => handleEditScript('_new') }],
+    { tabIndex: 0, onclick: handleNewScript }],
+  [i18n('buttonNewFromFile'),
+    { tabIndex: 0, onclick: handleNewScriptFromFile }],
   [i18n('installFrom', 'OpenUserJS'),
     { href: 'https://openuserjs.org/', ...EXTERNAL_LINK_PROPS }],
   [i18n('installFrom', 'GreasyFork'),
@@ -205,29 +235,39 @@ const RESTORE = 'restore';
 const TOGGLE = 'toggle';
 const UNDO = 'undo';
 const UPDATE = 'update';
+const collator = getSortCollator();
+const cmpName = (a, b) => collator.compare(a.$cache.lowerName, b.$cache.lowerName);
 /** @type {{ [key:string]: SortMode }} */
 const sortModes = [
-  ['exec', i18n('filterExecutionOrder')],
-  ['alpha', i18n('filterAlphabeticalOrder'), '',
-    ({ $cache: { lowerName: a } }, { $cache: { lowerName: b } }) => (a < b ? -1 : a > b)],
-  [UPDATE, i18n('filterLastUpdateOrder'), '',
+  ['exec', i18n('filterExecutionOrder'), IconSort, IconSortDown],
+  ['alpha', i18n('filterAlphabeticalOrder'), IconAlpha, IconAlphaDown, cmpName],
+  ['author',
+    i18n('labelAuthor').replace(/[\s:\u{A789}\u{FE13}\u{FE55}\u{FF1A}]+/u, '').toLowerCase(),
+    IconUser, IconUserDown,
+    (a, b) => collator.compare(a.meta.author || '', b.meta.author || '') || cmpName(a, b)],
+  [UPDATE, i18n('filterLastUpdateOrder'), IconClock, IconClockDown,
     (a, b) => (+b.props.lastUpdated || 0) - (+a.props.lastUpdated || 0)],
-  ['visit', i18n('filterLastVisitOrder'), i18n('filterLastVisitOrderTooltip'),
-    (a, b) => (b[INFERRED].visit || 0) - (a[INFERRED].visit || 0)],
-  ['size', i18n('filterSize'), '',
+  ['visit', i18n('filterLastVisitOrder'), IconCalendar, IconCalendarDown,
+    (a, b) => (b[INFERRED].visit || 0) - (a[INFERRED].visit || 0),
+    i18n('filterLastVisitOrderTooltip')],
+  ['size', i18n('filterSize'), IconSmallBig, IconBigSmall,
     (a, b) => a.$cache.sizeNum - b.$cache.sizeNum],
-].reduce((res, [key, text, title, compare]) => (
-  (res[key] = {text, title, compare}),
-  (res[key + '-'] = /**@namespace SortMode*/{
-    text: text + ' ⯆',
+].reduce((res, [key, text, icon, iconRev, compare, title]) => {
+  res[key] = {
+    text,
+    title,
+    icon,
+    compare,
+  };
+  res[key + '-'] = /**@namespace SortMode*/{
+    text: text + ' \u25BC', // ▼
     title: title,
-    compare: compare ? (a, b) => compare(b, a) :
-      /** @param {VMScript} a
-       * @param {VMScript} b */
-      (a, b) => b.props.position - a.props.position,
-  }),
-  res
-), {});
+    icon: iconRev,
+    reversed: true,
+    compare: compare || ((a, b) => a.props.position - b.props.position),
+  };
+  return res;
+}, {});
 const filters = reactive({
   /** @type {Boolean} */ showEnabledFirst: null,
   /** @type {Boolean} */ showOrder: null,
@@ -236,11 +276,6 @@ const filters = reactive({
   /** @type {Boolean} */ viewTable: null,
   sort: '',
 });
-const combinedCompare = cmpFunc => (
-  filters.showEnabledFirst
-    ? ((a, b) => b.config.enabled - a.config.enabled || cmpFunc(a, b))
-    : cmpFunc
-);
 filters::forEachKey(key => {
   hookSetting(`filters.${key}`, (val) => {
     filters[key] = key === 'sort' && !sortModes[val]
@@ -250,8 +285,9 @@ filters::forEachKey(key => {
 });
 
 const conditionAll = 'tabScripts';
-const conditionSearch = `${conditionAll} && inputFocus`;
-const conditionNotSearch = `${conditionAll} && !inputFocus`;
+const conditionSearch = `${conditionAll} && ${kbdTypable}`;
+const conditionNotSearch = `${conditionAll} && !${kbdTypable}`;
+const conditionNotNavigatable = `${conditionAll} && !${kbdNavigatable}`;
 const conditionScriptFocused = `${conditionNotSearch} && selectedScript && !showRecycle`;
 const conditionScriptFocusedRecycle = `${conditionNotSearch} && selectedScript && showRecycle`;
 const conditionScriptFocusedWithoutButton = `${conditionNotSearch} && !buttonFocus`;
@@ -268,18 +304,20 @@ const registerHotkey = (callback, items) => items.map(([key, condition, caseSens
 ));
 
 const MAX_BATCH_DURATION = 100;
+const RENDER_ALL = 1e9;
 let step = 0;
 
 let columnsForTableMode = [];
 let columnsForCardsMode = [];
-/** @type {CSSMediaRule} */
-let narrowMediaRules;
+let scrollTop1, scrollTop2;
+
+let newScriptCode;
 
 const $menuNew = ref();
 const isEmpty = ref();
+const collapseSorter = ref();
 const refSearch = ref();
 const refList = ref();
-const renderAll = ref(false);
 const scroller = ref();
 const kScrollTop = 'scrollTop';
 
@@ -292,8 +330,6 @@ const state = reactive({
     error: null,
     ...createSearchRules(''),
   },
-  sortedScripts: [],
-  filteredScripts: [],
   script: null,
   code: '',
   numColumns: 1,
@@ -304,18 +340,23 @@ const state = reactive({
     action: null,
     [UNDO]: null,
   },
+  size: '',
+  sizes: '',
 });
 
 const showRecycle = computed(() => store.route.paths[0] === TAB_RECYCLE);
 const draggableRaw = computed(() => !showRecycle.value && filters.sort.startsWith('exec'));
 const draggable = computed(() => isTouch && draggableRaw.value);
-const currentSortCompare = computed(() => sortModes[filters.sort]?.compare);
-const selectedScript = computed(() => state.filteredScripts[state.focusedIndex]);
+const currentSort = computed(() => sortModes[filters.sort] || false/* to avoid ?. for invalid mode */);
+const selectedScript = computed(() => filteredScripts.value[state.focusedIndex]);
 const message = computed(() => {
   if (!store.loaded) {
     return null;
   }
-  if (state.search.rules.length ? !state.sortedScripts.find(s => s.$cache.show !== false) : !state.sortedScripts.length) {
+  if (state.search.rules.length
+    ? !sortedScripts.value.find(s => s.$cache.show !== 0)
+    : !sortedScripts.value.length
+  ) {
     return i18n('labelNoSearchScripts');
   }
   return null;
@@ -349,9 +390,9 @@ const ALL_BATCH_ACTIONS = {
   },
 };
 const batchActions = computed(() => {
-  const scripts = state.filteredScripts;
+  const scripts = filteredScripts.value;
   const num = scripts.length;
-  const allShown = num === state.sortedScripts.length;
+  const allShown = num === sortedScripts.value.length;
   let res = ALL_BATCH_ACTIONS;
   let toEnable = 0;
   let toUpdate = 0;
@@ -366,7 +407,9 @@ const batchActions = computed(() => {
   return res;
 });
 
+const disposables = [];
 const debouncedSearch = debounce(scheduleSearch, 100);
+const lazyOrderUpdate = debounce(onUpdate, 50);
 
 function resetList() {
   if (!showRecycle.value && store.needRefresh) {
@@ -384,16 +427,27 @@ async function refreshUI() {
   onHashChange();
 }
 function sortScripts(scripts) {
-  const cmp = currentSortCompare.value;
-  if (cmp) scripts.sort(combinedCompare(cmp));
-  state.sortedScripts = scripts;
+  const { compare, reversed } = currentSort.value;
+  const searching = state.search.rules.length;
+  const enabledFirst = filters.showEnabledFirst;
+  if (compare || enabledFirst || searching) {
+    scripts.sort(!enabledFirst && !searching && !reversed
+      ? compare
+      : (a, b) => enabledFirst && (b.config.enabled - a.config.enabled)
+        || searching && (b.$cache.show - a.$cache.show)
+        || compare && (reversed ? compare(b, a) : compare(a, b)),
+    );
+  }
+  sortedScripts.value = scripts;
 }
-function onUpdate() {
+/** @param onlyReorder - only set when invoked from watch() for options that reorder the list */
+function onUpdate(onlyReorder) {
   const scripts = [...getCurrentList()];
-  const rules = state.search.rules;
-  if (rules.length) performSearch(scripts, rules);
+  if (!onlyReorder) performSearch(scripts);
   sortScripts(scripts);
-  state.filteredScripts = rules.length ? scripts.filter(({ $cache }) => $cache.show) : scripts;
+  filteredScripts.value = !onlyReorder && state.search.rules.length
+    ? scripts.filter(s => s.$cache.show)
+    : scripts;
   selectScript(state.focusedIndex);
   renderScripts();
 }
@@ -411,12 +465,35 @@ async function handleInstallFromURL() {
       await sendCmdDirectly('ConfirmInstall', { url });
     }
   } catch (err) {
-    showMessage({ text: err.message || err });
+    showErrorMessage(err);
   }
+}
+function handleNewScriptFromFile() {
+  /** @type {HTMLInputElement} */
+  const el = document.createElement('input');
+  el.type = 'file';
+  el.accept = 'application/javascript,text/javascript,text/plain,.js';
+  el.style = 'display:none !important';
+  document.body.appendChild(el);
+  el.onchange = async () => {
+    if (el.value) {
+      try {
+        newScriptCode = await readBlob(el.files[0], 'text');
+        handleNewScript();
+      } catch (err) {
+        showErrorMessage(err);
+      }
+    }
+    el.remove();
+  };
+  el.click();
+}
+function showErrorMessage(err) {
+  showMessage({ text: err.message || err });
 }
 async function moveScript(from, to) {
   if (from === to) return;
-  const scripts = state.filteredScripts;
+  const scripts = filteredScripts.value;
   const allScripts = store.scripts;
   const script = scripts[from];
   const aFrom = allScripts.indexOf(script);
@@ -430,7 +507,9 @@ async function moveScript(from, to) {
   }
 }
 function handleOrderChange(e) {
-  options.set('filters.sort', e.target.value);
+  options.set('filters.sort',
+    // Not waiting for debounced options hook to ensure UI always matches <select>
+    filters.sort = e.target.value);
 }
 function handleEditScript(id) {
   const pathname = [showRecycle.value ? TAB_RECYCLE : SCRIPTS, id]::trueJoin('/');
@@ -441,14 +520,28 @@ function handleEditScript(id) {
   }
 }
 async function onHashChange() {
-  const [tab, id, cacheId] = store.route.paths;
-  const newData = id === '_new' && await sendCmdDirectly('NewScript', +cacheId);
-  const script = newData ? newData.script : +id && getCurrentList().find(s => s.props.id === +id);
-  if (script) {
-    state.code = newData ? newData.code : await sendCmdDirectly('GetScriptCode', id);
-    state.script = script;
-    return;
+  const [tab, id, tabId] = store.route.paths;
+  if (__.MV3 && id) store.busyId = id;
+  const _new = id === '_new' && await sendCmdDirectly('NewScript', {
+    code: newScriptCode,
+    .../^\d+$/.test(tabId) && { tabId: +tabId },
+  });
+  const script = _new || +id && getCurrentList().find(s => s.props.id === +id);
+  const scrollElem1 = scroller.value;
+  const scrollElem2 = document.scrollingElement; // for compact layout
+  if (script && !state.script) { // going into editor
+    scrollTop1 = scrollElem1[kScrollTop];
+    scrollTop2 = scrollElem2[kScrollTop];
   }
+  if (script) {
+    state.code = newScriptCode || _new.code || await sendCmdDirectly('GetScriptCode', id);
+    state.dirty = !!newScriptCode;
+    if (_new) delete script.code;
+    state.script = script;
+  }
+  newScriptCode = '';
+  if (__.MV3 && id) store.busyId = 0;
+  if (script) return;
   // Strip the invalid id from the URL so |App| can render the aside,
   // which was hidden to avoid flicker on initial page load directly into the editor.
   if (id) setRoute(tab, true);
@@ -458,22 +551,22 @@ async function onHashChange() {
     loadData();
   }
   renderScripts();
-  state.script = null;
-  // Workaround for bug in Chrome, not suppressible via overflow-anchor:none
-  if (!IS_FIREFOX) {
-    const el = scroller.value;
-    const el2 = document.scrollingElement; // for compact layout
-    const pos = el[kScrollTop];
-    const pos2 = el2[kScrollTop];
-    nextTick(() => {
-      el[kScrollTop] = pos;
-      el2[kScrollTop] = pos2;
+  if (state.script) {
+    state.script = null;
+    nextTick(() => { // scroll position has to be restored explicitly in Chrome and Firefox Android
+      scrollElem1[kScrollTop] = scrollTop1;
+      scrollElem2[kScrollTop] = scrollTop2;
     });
   }
 }
 async function renderScripts() {
-  if (!store.canRenderScripts || renderAll.value) return;
-  const { length } = state.sortedScripts;
+  if (!store.canRenderScripts
+  || state.batchRender.limit === RENDER_ALL
+  /* Skip rendering as the editor is being closed right now and we only have 1 script,
+     we'll render in the next call after all scripts data is requested. */
+  || store.title) return;
+  const scripts = sortedScripts.value;
+  const { length } = scripts;
   let limit = 9;
   const batchRender = reactive({ limit });
   state.batchRender = batchRender;
@@ -483,20 +576,20 @@ async function renderScripts() {
     if (step && state.search.rules.length) {
       // Only visible items contribute to the batch size
       for (let vis = 0; vis < step && limit < length; limit += 1) {
-        vis += state.sortedScripts[limit].$cache.show ? 1 : 0;
+        vis += scripts[limit].$cache.show ? 1 : 0;
       }
     } else {
       limit += step || 1;
     }
     batchRender.limit = limit;
-    await new Promise(resolve => nextTick(resolve));
-    if (!step && performance.now() - startTime >= MAX_BATCH_DURATION) {
+    // Let the browser calculate the layout so we know the real duration of the batch
+    const now = await new Promise(requestAnimationFrame);
+    if (!step && now - startTime >= MAX_BATCH_DURATION) {
       step = limit * 2; // the first batch is slow to render because it has more work to do
     }
-    if (step && limit < length) await makePause();
   }
   // Completed the potentially slow initial creation, subsequent redraws will be fast
-  if (limit === length) renderAll.value = true;
+  if (length && limit >= length) batchRender.limit = RENDER_ALL;
 }
 function scheduleSearch() {
   try {
@@ -510,6 +603,11 @@ function scheduleSearch() {
   }
   const ids = searchNeedsCodeIds.value;
   if (ids?.length) getCodeFromStorage(ids);
+  if (!state.search.rules.length) {
+    for (const { $cache } of /**@type{UIScript[]}*/store.scripts) {
+      $cache.mark = $cache.show = null;
+    }
+  }
   onUpdate();
 }
 async function getCodeFromStorage(ids) {
@@ -525,18 +623,9 @@ async function handleEmptyRecycleBin() {
     store.removedScripts = [];
   }
 }
-function adjustNarrowWidth(val) {
+function adjustNarrowWidth(isTable) {
   adjustScriptWidth();
-  if (val && !narrowMediaRules) {
-    narrowMediaRules = findStyleSheetRules('-width: 76'); // max-width: 767px, min-width: 768px
-    for (const r of narrowMediaRules) r._orig = r.conditionText;
-  }
-  if (narrowMediaRules) {
-    for (const r of narrowMediaRules) {
-      const orig = r._orig;
-      r.media.mediaText = val ? orig.replace(/\d+/g, s => +s + 90 / devicePixelRatio) : orig;
-    }
-  }
+  onMediaWidth(NARROW_WIDTH + (isTable ? 90 / devicePixelRatio : 0), true);
 }
 function adjustScriptWidth() {
   const widths = filters.viewTable ? columnsForTableMode : columnsForCardsMode;
@@ -544,7 +633,7 @@ function adjustScriptWidth() {
     : widths.findIndex(w => window.innerWidth < w) + 1 || widths.length + 1;
 }
 function selectScript(index) {
-  index = Math.min(index, state.filteredScripts.length - 1);
+  index = Math.min(index, filteredScripts.value.length - 1);
   index = Math.max(index, -1);
   if (index !== state.focusedIndex) {
     state.focusedIndex = index;
@@ -584,7 +673,10 @@ function handleActionToggle(script) {
  */
 async function handleActionUpdate(what, el) {
   if (el) (el = (el.querySelector('svg') || el.closest('svg') || el).classList).add('rotate');
-  await sendCmdDirectly('CheckUpdate', what && ensureArray(what).map(s => s.props.id));
+  await sendCmdDirectly('CheckUpdate', !!what && {
+    ids: ensureArray(what).map(s => s.props.id),
+    force: what.force,
+  });
   el?.remove('rotate');
 }
 function handleClickTag(tag) {
@@ -594,7 +686,10 @@ function handleClickTag(tag) {
     state.search.value = tokens.map(token => `${token.prefix}${token.raw}`).join(' ');
   } else {
     // add tag
-    state.search.value = [state.search.value.trim(), `#${tag} `].filter(Boolean).join(' ');
+    state.search.value = [
+      state.search.value.trim(),
+      /\s/.test(tag) ? `#"${tag}" ` : `#${tag} `,
+    ]::trueJoin(' ');
   }
 }
 function handleSmoothScroll(delta) {
@@ -613,7 +708,7 @@ function handleBatchAction(e) {
   if (stateBA.action === action) {
     // Confirmed
     const baVal = batchActions.value[action] || {};
-    const scripts = state.filteredScripts;
+    const scripts = filteredScripts.value;
     const arg = baVal.arg?.(scripts) || scripts;
     const fn = baVal.fn;
     const batchArgs = [fn, arg, button];
@@ -632,7 +727,7 @@ function bindKeys() {
     keyboardService.setContext('buttonFocus', getActiveElement()?.tabIndex >= 0);
   };
   addEventListener('focus', handleFocus, true);
-  const disposeList = [
+  disposables.push(
     () => removeEventListener('focus', handleFocus, true),
     ...IS_FIREFOX ? [
       keyboardService.register('tab', () => {
@@ -651,7 +746,7 @@ function bindKeys() {
     ...registerHotkey(() => {
       refSearch.value?.blur();
     }, [
-        ['enter', conditionSearch],
+        ['enter', `${conditionSearch} && !${kbdNavigatable}`],
       ]),
     ...registerHotkey(() => {
       state.showHotkeys = false;
@@ -663,12 +758,12 @@ function bindKeys() {
       let index = state.focusedIndex;
       if (index < 0) index = 0;
       else index += state.numColumns;
-      if (index < state.filteredScripts.length) {
+      if (index < filteredScripts.value.length) {
         selectScript(index);
       }
     }, [
         ['ctrlcmd-down', conditionAll],
-        ['down', conditionAll],
+        ['down', conditionNotNavigatable],
         ['j', conditionNotSearch, true],
       ]),
     ...registerHotkey(() => {
@@ -678,7 +773,7 @@ function bindKeys() {
       }
     }, [
         ['ctrlcmd-up', conditionAll],
-        ['up', conditionAll],
+        ['up', conditionNotNavigatable],
         ['k', conditionNotSearch, true],
       ]),
     ...registerHotkey(() => {
@@ -702,7 +797,7 @@ function bindKeys() {
         ['g g', conditionNotSearch, true],
       ]),
     ...registerHotkey(() => {
-      selectScript(state.filteredScripts.length - 1);
+      selectScript(filteredScripts.value.length - 1);
     }, [
         ['ctrlcmd-end', conditionAll],
         ['G', conditionNotSearch, true],
@@ -740,11 +835,7 @@ function bindKeys() {
     }, [
         ['?', conditionNotSearch, true],
       ]),
-  ];
-
-  return () => disposeList.forEach(dispose => {
-    dispose();
-  });
+  );
 }
 
 function handleCancelBatchAction(e) {
@@ -758,11 +849,14 @@ watch(showRecycle, resetList);
 watch(() => store.canRenderScripts && refList.value && draggableRaw.value,
   dr => toggleDragging(refList.value, moveScript, dr));
 watch(() => state.search.value, debouncedSearch);
-watch(() => [filters.sort, filters.showEnabledFirst], scheduleSearch);
-if (screen.availWidth > 767) {
-  watch(() => filters.viewSingleColumn, adjustScriptWidth);
-  watch(() => filters.viewTable, adjustNarrowWidth);
-}
+watch(() => [filters.sort, filters.showEnabledFirst], lazyOrderUpdate);
+disposables.push(
+  watch(() => filters.viewSingleColumn, adjustScriptWidth),
+  watch(() => filters.viewTable, adjustNarrowWidth, { immediate: true }),
+);
+onMediaWidth(700, false, val => {
+  collapseSorter.value = val;
+});
 watch(getCurrentList, refreshUI);
 watch(() => store.route.paths[1], onHashChange);
 watch(() => store.scripts, val => {
@@ -777,8 +871,23 @@ watch(selectedScript, script => {
 watch(() => state.showHotkeys, value => {
   keyboardService.setContext('showHotkeys', value);
 });
-
-const disposables = [];
+watch(filteredScripts, value => {
+  const totals = Array(SIZE_TITLES.length).fill(0);
+  for (const script of value) {
+    for (let i = 0; i < totals.length; i++) {
+      totals[i] += script.$cache.sizesNum[i];
+    }
+  }
+  let sum = 0;
+  let str = '';
+  totals.forEach((val, i) => {
+    sum += val;
+    if (val) str += `${SIZE_TITLES[i]}: ${formatByteLength(val)}\n`;
+  });
+  // `null` removes the attribute to disable the ::after CSS rule
+  state.size = sum ? formatByteLength(sum).replace(' ', '') : null;
+  state.sizes = sum ? formatSizesStr(str) : '';
+});
 
 Object.assign(handlers, {
   Visited(data) {
@@ -819,7 +928,7 @@ onMounted(() => {
     addEventListener('resize', adjustScriptWidth);
   }
   adjustScriptWidth();
-  disposables.push(bindKeys());
+  bindKeys();
 
   document.addEventListener('mousedown', handleCancelBatchAction);
   disposables.push(() => document.removeEventListener('mousedown', handleCancelBatchAction));
@@ -832,6 +941,8 @@ onBeforeUnmount(() => {
 
 <style>
 $iconSize: 2rem; // from .icon in ui/style.css
+$headerH: 4rem;
+$headerBorder: 1px solid var(--fill-5);
 .tab.tab-installed {
   height: 100vh;
   padding: 0;
@@ -841,33 +952,79 @@ $iconSize: 2rem; // from .icon in ui/style.css
     top: 0;
     z-index: 1000;
     background: var(--fill-0-5);
-    height: 4rem;
-    align-items: center;
-    line-height: 1;
-    border-bottom: 1px solid var(--fill-5);
+    border-bottom: $headerBorder;
+    justify-content: space-between;
     .btn-ghost, select {
       height: $iconSize;
     }
-  }
-  .vl-dropdown-menu {
-    white-space: nowrap;
-  }
-  @media (max-width: 550px) { // same size as `hidden-sm` in @/common/ui/style/style.css
-    /* The header bar must be set to scrollable and the dropdown fixed simultaneously. */
-    header {
-      overflow-x: auto;
-      overflow-y: hidden;
+    > * {
+      height: $headerH;
+      align-items: center;
+      display: inline-flex;
+    }
+    .vl-dropdown-toggle .icon {
+      width: 1.25rem;
     }
     .vl-dropdown-menu {
-      position: fixed;
-      top: auto;
-      left: 0;
-      right: auto;
+      white-space: nowrap;
     }
   }
-  @media (max-width: 767px) {
+  @media (max-width: 640px) {
+    header {
+      flex-wrap: wrap;
+      border-bottom: none;
+      > * {
+        flex: 1;
+        border-bottom: $headerBorder;
+      }
+    }
+    .filtered {
+      border-right: none;
+    }
+  }
+  .sorter {
+    padding: 0; /* undo the dynamically assigned btn-ghost class in narrow mode */
+    svg {
+      width: $iconSize;
+      height: $iconSize;
+      padding: 2px;
+      pointer-events: none;
+    }
+    &.btn-ghost {
+      position: relative;
+      > select {
+        width: $iconSize;
+        opacity: 0;
+      }
+      svg {
+        z-index: 2;
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+      }
+    }
+  }
+  .narrow & {
     height: auto;
     overflow: visible;
+    header {
+      .hidden-sm {
+        display: none;
+      }
+      > :last-child,
+      .filter-search {
+        flex: 1;
+      }
+    }
+  }
+  html:not(.narrow) & {
+    header {
+      .sorter {
+        border: 1px solid transparent; /* to match btn-ghost class in narrow mode */
+      }
+    }
   }
 }
 .backdrop {
@@ -903,7 +1060,8 @@ $iconSize: 2rem; // from .icon in ui/style.css
   }
 }
 .filter-search {
-  flex-grow: 10;
+  min-width: 5em;
+  flex-basis: 10em;
   label {
     position: relative;
   }
@@ -915,9 +1073,9 @@ $iconSize: 2rem; // from .icon in ui/style.css
   }
   input {
     width: 100%;
-    height: 2rem;
+    height: $iconSize;
     padding-left: .5rem;
-    padding-right: 2rem;
+    padding-right: $iconSize;
   }
   &-tooltip {
     width: 24rem;
@@ -927,7 +1085,7 @@ $iconSize: 2rem; // from .icon in ui/style.css
     white-space: pre-wrap;
   }
 }
-.filter-sort {
+.settings {
   .vl-dropdown-menu {
     padding: 1rem;
     > :nth-last-child(n + 2) {
@@ -954,6 +1112,7 @@ $iconSize: 2rem; // from .icon in ui/style.css
 .btn-hint {
   margin: 0 0.5rem;
   cursor: default;
+  min-width: 7em;
 }
 
 .hint {
@@ -964,7 +1123,9 @@ $iconSize: 2rem; // from .icon in ui/style.css
     border-top: 1px solid var(--fill-5);
   }
 }
-
+[data-size]::after {
+  content: ' (' attr(data-size) ')';
+}
 .rotate {
   animation: 4s linear infinite rotate;
 }

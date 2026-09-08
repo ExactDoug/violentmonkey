@@ -1,48 +1,53 @@
+import { addErrorStack } from '../util';
+
 const handlers = createNullObj();
 export const addHandlers = obj => assign(handlers, obj);
 export const callbacks = createNullObj();
-/**
- * @mixes VMInjection.Info
- * @property {VMBridgePostFunc} post - synchronous
- * @property {VMBridgeMode} mode
- */
-const bridge = {
-  __proto__: null,
-  onHandle({ cmd, data, node }) {
-    const fn = handlers[cmd];
-    if (fn) node::fn(data);
-  },
-  /** @return {Promise} asynchronous */
-  promise(cmd, data, node) {
-    let cb;
-    let res;
-    res = new SafePromise(resolve => {
-      cb = resolve;
-    });
-    if (IS_FIREFOX) setPrototypeOf(res, SafePromiseConstructor);
-    postWithCallback(cmd, data, node, cb);
-    return res;
-  },
-  /** @return {?} synchronous */
-  call: postWithCallback,
-};
-
-let callbackResult;
-
-function postWithCallback(cmd, data, node, cb, customCallbackId) {
-  const id = safeGetUniqId();
-  callbacks[id] = cb || defaultCallback;
-  if (customCallbackId) {
-    setOwnProp(data, customCallbackId, id);
-  } else {
-    data = { [CALLBACK_ID]: id, data };
+export const commands = createNullObj();
+export const displayNames = createNullObj();
+export const storages = createNullObj();
+/** @type {VMInjection.Info} */
+export const info = createNullObj();
+export const onHandle = ({ cmd, data, node }) => {
+  if ((cmd = handlers[cmd])) {
+    if (node) node::cmd(data);
+    else cmd(data);
   }
-  bridge.post(cmd, data, node);
-  if (!cb) return callbackResult;
-}
-
-function defaultCallback(val) {
-  callbackResult = val;
-}
-
-export default bridge;
+};
+/**
+ * @param {string} cmd
+ * @param {any} data
+ * @param {EventTarget} [node]
+ * @return {Promise}
+ */
+export const promise = (cmd, data, node) => {
+  const prr = SafePromiseWithResolvers();
+  call(cmd, data, node, prr.resolve);
+  return prr.promise;
+};
+/**
+ * @param {string} cmd
+ * @param {any} data
+ * @param {Node} [node]
+ * @param {(this: Node, res: any, err?: Error) => any} [cb] - callback
+ * @param {boolean} [cbAsync] - to keep the original callstack in the async error provided to `cb`,
+ *                              note that Promise already tracks the caller in modern browsers.
+ * @return {any} the result in synchronous mode (no `cb`)
+ */
+export const call = (cmd, data, node, cb, cbAsync) => {
+  let res, err;
+  const id = safeGetUniqId();
+  callbacks[id] = [
+    cb || ((a, b) => { res = a; err = b; }),
+    cbAsync && new SafeError(),
+  ];
+  post(cmd, { [CALLBACK_ID]: id, data }, node);
+  if (!cb) {
+    if (err) throw addErrorStack(err, new SafeError());
+    return res;
+  }
+};
+/** @type {VMBridgeMode} */
+export let mode;
+/** @type {VMBridgePostFunc} */
+export let post;

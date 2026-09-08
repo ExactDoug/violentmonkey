@@ -1,6 +1,6 @@
 // SAFETY WARNING! Exports used by `injected` must make ::safe() calls and use __proto__:null
 
-import { NO_CACHE, U8_fromBase64 } from '@/common/consts';
+import { BLOB_LIFE, U8_fromBase64 } from '@/common/consts';
 
 export const i18n = memoize((name, args) => chrome.i18n.getMessage(name, args) || name);
 const HAS_BASE64_RE = /(^|;)\s*base64\s*(;|$)/;
@@ -15,7 +15,7 @@ export function memoize(func) {
       ? res
       : (cacheMap[key] = safeApply(func, this, args));
   }
-  return process.env.DEV
+  return __.DEV
     ? Object.defineProperty(memoized, 'name', { value: func.name + ':memoized' })
     : memoized;
 }
@@ -62,33 +62,36 @@ export function throttle(func, time) {
 
 export function noop() {}
 
-export function getRandomString(minLength = 10, maxLength = 0) {
-  for (let rnd = ''; (rnd += Math.random().toString(36).slice(2));) {
-    if (rnd.length >= minLength) return maxLength ? rnd.slice(0, maxLength) : rnd;
+export function getUniqId(prefix = 'VM', idSafe) {
+  let res = crypto.getRandomValues(new Uint8Array(12));
+  if (U8_fromBase64) { // minimum_chrome_version>=140, strict_min_version>=133
+    res = res.toBase64({ alphabet: 'base64url', omitPadding: true });
+    if (idSafe) res = res.replaceAll('-', '$');
+  } else {
+    res = btoa(String.fromCharCode(...res));
+    if (idSafe) res = res.replace(/\+/g, '$').replace(/\//g, '_').replace(/=+/, '');
   }
-}
-
-export function getUniqId(prefix = 'VM') {
-  return prefix + getRandomString();
+  return prefix + res;
 }
 
 /**
  * @param {ArrayBuffer|Uint8Array|Array} buf
- * @param {number} [offset]
- * @param {number} [length]
  * @return {string} a binary string i.e. one byte per character
  */
-export function buffer2string(buf, offset = 0, length = 1e99) {
+export function buffer2string(buf) {
+  const arrayLen = buf.length; // present on Uint8Array/Array
+  if (U8_fromBase64) { // 3x faster even with the extra string for GC
+    return atob((arrayLen != null ? buf : new Uint8Array(buf)).toBase64());
+  }
   // The max number of arguments varies between JS engines but it's >32k so we're safe
   const sliceSize = 8192;
   const slices = [];
-  const arrayLen = buf.length; // present on Uint8Array/Array
-  const end = Math.min(arrayLen || buf.byteLength, offset + length);
-  const needsSlicing = arrayLen == null || offset || end > sliceSize;
-  for (; offset < end; offset += sliceSize) {
+  const end = arrayLen || buf.byteLength;
+  const needsSlicing = arrayLen == null || end > sliceSize;
+  for (let offset = 0; offset < end; offset += sliceSize) {
     slices.push(String.fromCharCode.apply(null,
       needsSlicing
-        ? new Uint8Array(buf, offset, Math.min(sliceSize, end - offset))
+        ? new Uint8Array(arrayLen ? buf.buffer : buf, offset, Math.min(sliceSize, end - offset))
         : buf));
   }
   return slices.join('');
@@ -109,16 +112,10 @@ export function blob2base64(blob, offset = 0, length = 1e99) {
     return '';
   }
   if (U8_fromBase64) {
+    // Not using {alphabet: 'base64url'} because a data URI uses standard base64 encoding
     return blob.arrayBuffer().then(buf => new Uint8Array(buf).toBase64());
   }
-  return new Promise(resolve => {
-    const reader = new FileReader();
-    reader.readAsDataURL(blob);
-    reader.onload = () => {
-      const res = reader.result;
-      resolve(res.slice(res.indexOf(',') + 1));
-    };
-  });
+  return readBlob(blob).then(res => res.slice(res.indexOf(',') + 1));
 }
 
 export function dataUri2text(url) {
@@ -222,72 +219,26 @@ export function ensureArray(data) {
   return Array.isArray(data) ? data : [data];
 }
 
-const binaryTypes = [
-  'blob',
-  'arraybuffer',
-];
-
-/**
- * @param {string} url
- * @param {VMReq.Options} options
- * @return {Promise<VMReq.Response>}
- */
-export async function requestLocalFile(url, options = {}) {
-  // only GET method is allowed for local files
-  // headers is meaningless
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    /** @type {VMReq.Response} */
-    const result = {
-      headers: {
-        get: name => xhr.getResponseHeader(name),
-      },
-      url,
-    };
-    const { [kResponseType]: responseType } = options;
-    xhr.open('GET', url, true);
-    if (binaryTypes.includes(responseType)) xhr[kResponseType] = responseType;
-    xhr.onload = () => {
-      // status for `file:` protocol will always be `0`
-      result.status = xhr.status || 200;
-      result.data = xhr[binaryTypes.includes(responseType) ? kResponse : kResponseText];
-      if (responseType === 'json') {
-        try {
-          result.data = JSON.parse(result.data);
-        } catch {
-          // ignore invalid JSON
-        }
-      }
-      resolve(result);
-    };
-    xhr.onerror = () => {
-      result.status = -1;
-      reject(result);
-    };
-    xhr.send();
-  });
-}
-
 const isDataUriRe = /^data:/i;
 const isHttpOrHttpsRe = /^https?:\/\//i;
-const isLocalUrlRe = re`/^(
+const isLocalUrlRe = regex('i')`^(
   file:|
   about:|
   data:|
-  https?:\/\/
-    ([^@/]*@)?
+  https?://
+    ([^@\/]*@)?
     (
       localhost|
       127\.0\.0\.1|
       (192\.168|172\.16|10\.0)\.\d+\.\d+|
-      \[(::1|(fe80|fc00)::[.:0-9a-f]+)]|
-      [^/:]+\.(test|example|invalid|localhost)
+      \[(::1|(fe80|fc00)::[.:0-9a-f]+)\]|
+      [^\/:]+\.(test|example|invalid|localhost)
     )
-    (:\d+|\/|$)
-)/ix`;
+    (:\d+|/|$)
+)`;
 /** Cherry-picked from https://greasyfork.org/en/help/cdns */
-export const isCdnUrlRe = re`/^https:\/\/(
-  (\w+-)?cdn(js)?(-\w+)?\.[^/]+ |
+export const isCdnUrlRe = regex('i')`^https://(
+  (\w+-)?cdn(js)?(-\w+)?\.[^\/]+ |
   bundle\.run |
   (www\.)?gitcdn\.\w+ |
   (
@@ -311,11 +262,11 @@ export const isCdnUrlRe = re`/^https:\/\/(
     bowercdn |
     craig\.global\.ssl\.fastly
   )\.net |
-  [^/.]+\.(
+  [^\/.]+\.(
     github\.(io | com) |
     zstatic\.net
   )
-)\//ix`;
+)/`;
 export const isDataUri = /*@__PURE__*/isDataUriRe.test.bind(isDataUriRe);
 export const isValidHttpUrl = url => isHttpOrHttpsRe.test(url) && tryUrl(url);
 export const isRemote = url => url && !isLocalUrlRe.test(decodeURI(url));
@@ -329,55 +280,6 @@ export function tryUrl(str, base) {
   } catch (e) {
     // undefined
   }
-}
-
-/**
- * Make a request.
- * @param {string} url
- * @param {VMReq.Options} options
- * @return {Promise<VMReq.Response>}
- */
-export async function request(url, options = {}) {
-  // fetch supports file:// since Chrome 99 but we use XHR for consistency
-  if (url.startsWith('file:')) return requestLocalFile(url, options);
-  const { body, headers, [kResponseType]: responseType } = options;
-  const isBodyObj = body && body::({}).toString() === '[object Object]';
-  const [, scheme, auth, hostname, urlTail] = url.match(/^([-\w]+:\/\/)([^@/]*@)?([^/]*)(.*)|$/);
-  // Avoiding LINK header prefetch of js in 404 pages which cause CSP violations in our console
-  // TODO: toggle a webRequest/declarativeNetRequest rule to strip LINK headers
-  const accept = (hostname === 'greasyfork.org' || hostname === 'sleazyfork.org')
-    && 'application/javascript, text/plain, text/css';
-  const init = Object.assign({}, !isRemote(url) && NO_CACHE, options, {
-    body: isBodyObj ? JSON.stringify(body) : body,
-    headers: isBodyObj || accept || auth
-      ? Object.assign({},
-        headers,
-        isBodyObj && { 'Content-Type': 'application/json' },
-        auth && { Authorization: `Basic ${btoa(decodeURIComponent(auth.slice(0, -1)))}` },
-        accept && { accept })
-      : headers,
-  });
-  let status = -1;
-  let result = { url };
-  try {
-    const urlNoAuth = auth ? scheme + hostname + urlTail : url;
-    const resp = await fetch(urlNoAuth, init);
-    const loadMethod = {
-      arraybuffer: 'arrayBuffer',
-      blob: 'blob',
-      json: 'json',
-    }[responseType] || 'text';
-    // status for `file:` protocol will always be `0`
-    status = resp.status || 200;
-    result.headers = resp.headers;
-    result.data = await resp[loadMethod]();
-  } catch (err) {
-    result = Object.assign(err, result);
-    result.message += (status > 0 ? ` (HTTP ${status})` : ' (could not connect)') + '\n' + url;
-  }
-  result.status = status;
-  if (status < 0 || status > 300) throw result;
-  return result;
 }
 
 // Used by `injected`
@@ -400,6 +302,58 @@ export function normalizeTag(tag) {
   return tag.replace(/[^\w.-]/g, '');
 }
 
-export function escapeStringForRegExp(str) {
-  return str.replace(/[\\.?+[\]{}()|^$]/g, '\\$&');
+let keepAliveChain, keepAliveTimer;
+
+/**
+ * @template T
+ * @param {T} [promise]
+ * @return {T | ((v?: any) => void)} original promise or a new promise's resolver
+ */
+export function keepAlive(promise) {
+  let res = promise;
+  if (!res) ({ promise, resolve: res } = Promise.withResolvers());
+  const chain = keepAliveChain = keepAliveChain ? keepAliveChain.finally(() => promise) : promise;
+  keepAliveChain.finally(() => {
+    if (keepAliveChain === chain) {
+      clearInterval(keepAliveTimer);
+      keepAliveChain = keepAliveTimer = 0;
+    }
+  });
+  keepAliveTimer ||= setInterval(chrome.runtime.getPlatformInfo, 25e3);
+  return res;
+}
+
+export function leaseBlobUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  makePause(BLOB_LIFE, url).then(URL.revokeObjectURL);
+  return url;
+}
+
+/**
+ * @template T
+ * @param {number} [ms]
+ * @param {T} [arg] - resolved value of the Promise
+ * @return {Promise<T>}
+ */
+export function makePause(ms, arg) {
+  const res = ms < 0
+    ? Promise.resolve(arg)
+    : new Promise(resolve => setTimeout(resolve, ms, arg));
+  return __.SW && ms > 0 ? keepAlive(res) : res;
+}
+
+/**
+ * @param {Blob} blob
+ * @param {boolean | 'text'} [asBuffer]
+ * @return {Promise<string|ArrayBuffer>}
+ */
+export function readBlob(blob, asBuffer) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    if (asBuffer === 'text') reader.readAsText(blob);
+    else if (asBuffer) reader.readAsArrayBuffer(blob);
+    else reader.readAsDataURL(blob);
+  });
 }

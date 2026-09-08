@@ -1,14 +1,14 @@
-import bridge, { addHandlers } from './bridge';
-import { elemByTag, makeElem, nextTask, onElement, sendCmd } from './util';
 import { bindEvents, CONSOLE_METHODS, fireBridgeEvent, META_STR } from '../util';
+import * as bridge from './bridge';
 import { Run } from './cmd-run';
+import { elemByTag, makeElem, nextTask, onElement, sendCmd } from './util';
 
-const bridgeIds = bridge[IDS];
 const kWrappedJSObject = 'wrappedJSObject';
 let tardyQueue;
-let bridgeInfo;
-let contLists;
-let pageLists;
+export let injectedInfo;
+export let injectedRealms;
+/** @type {{[runAt: VMScriptRunAt]: VMInjection.Script[]}} */
+let contLists, pageLists;
 /** @type {?boolean} */
 let pageInjectable;
 let frameEventWnd;
@@ -20,12 +20,12 @@ let getAttribute;
 let querySelector;
 
 // https://bugzil.la/1408996
-let VMInitInjection = window[INIT_FUNC_NAME];
+let VMInitInjection = window[__.INIT_FUNC_NAME];
 /** Avoid running repeatedly due to new `documentElement` or with declarativeContent in Chrome.
  * The prop's mode is overridden to be unforgeable by a userscript in content mode. */
-setOwnProp(window, INIT_FUNC_NAME, 1, false);
+setOwnProp(window, __.INIT_FUNC_NAME, 1, false);
 
-addHandlers({
+if (!__.MV3) bridge.addHandlers({
   /**
    * FF bug workaround to enable processing of sourceURL in injected page scripts
    */
@@ -60,7 +60,7 @@ export function injectPageSandbox(data) {
   } else {
     setOwnProp(global, VAULT_WRITER, tellBridgeToWriteVault, false);
   }
-  if (useOpener(opener) || useOpener(window !== top && parent)) {
+  if (useOpener(opener) || useOpener(window !== top && parent, true)) {
     startHandshake();
   } else {
     /* Sites can do window.open(sameOriginUrl,'iframeNameOrNewWindowName').opener=null, spoof JS
@@ -76,16 +76,10 @@ export function injectPageSandbox(data) {
   }
   return pageInjectable;
 
-  function useOpener(opener) {
-    let ok;
-    try {
-      ok = opener && describeProperty(opener.location, 'href').get;
-    } catch (e) {
-      // Old Chrome throws in sandboxed frames, TODO: remove `try` when minimum_chrome_version >= 86
-    }
+  function useOpener(opener, isFrame) {
+    let ok = opener && (isFrame ? frameElement : describeProperty(opener.location, 'href').get);
     if (ok) {
       ok = false;
-      // TODO: Use a single PointerEvent with `pointerType: vaultId` when strict_min_version >= 59
       if (IS_FIREFOX) {
         const setOk = evt => { ok = evt::getDetail(); };
         window::on(VAULT_WRITER_ACK, setOk, true);
@@ -105,13 +99,13 @@ export function injectPageSandbox(data) {
    * Directly preventing it would require redefining ~20 DOM methods in the parent.
    * Instead, we'll send the ids via a temporary handshakeId event, to which the web-bridge
    * will listen only during its initial phase using vault-protected DOM methods.
-   * TODO: simplify this when strict_min_version >= 63 (attachShadow in FF) */
+   */
   function startHandshake() {
     /* With `once` the listener is removed before DOMNodeInserted is dispatched by appendChild,
      * otherwise a same-origin parent page could use it to spoof the handshake. */
     window::on(handshakeId, handshaker, { capture: true, once: true });
     inject({
-      code: `(${VMInitInjection}(${IS_FIREFOX},'${handshakeId}','${vaultId}'))()`
+      code: `(${VMInitInjection})(${IS_FIREFOX},'${handshakeId}','${vaultId}')()`
         + `\n//# sourceURL=${VM_UUID}sandbox/injected-web.js`,
     });
     // Clean up in case CSP prevented the script from running
@@ -120,7 +114,8 @@ export function injectPageSandbox(data) {
   function handshaker(evt) {
     pageInjectable = true;
     evt::stopImmediatePropagation();
-    bindEvents(contentId, webId, bridge);
+    // eslint-disable-next-line no-import-assign
+    bridge.post = bindEvents(contentId, webId, bridge.onHandle, true);
     fireBridgeEvent(`${handshakeId}*`, [webId, contentId]);
   }
 }
@@ -137,13 +132,10 @@ export async function injectScripts(data, info, isXml) {
   if (errors) {
     logging.warn(errors);
   }
-  info.gmi = {
-    isIncognito: chrome.extension.inIncognitoContext,
-  };
-  bridgeInfo = createNullObj();
-  bridgeInfo[PAGE] = info;
-  bridgeInfo[CONTENT] = info;
-  assign(bridge[CACHE], data[CACHE]);
+  injectedInfo = { __proto: null, [PAGE]: info, [CONTENT]: info };
+  injectedRealms = createNullObj();
+  setPrototypeOf(bridge.cache = data[CACHE], null); // eslint-disable-line no-import-assign
+  bridge.pathMaps = createNullObj(); // eslint-disable-line no-import-assign
   if (isXml || data[FORCE_CONTENT]) {
     pageInjectable = false;
   } else if (data[PAGE] && pageInjectable == null) {
@@ -181,7 +173,7 @@ export async function injectScripts(data, info, isXml) {
     }, BODY);
   }
   if (more && (data = await moreData)) {
-    assign(bridge[CACHE], data[CACHE]);
+    assign(bridge.cache, data[CACHE]);
     if (document::getReadyState() === 'loading') {
       await new SafePromise(resolve => {
         /* Since most sites listen to DOMContentLoaded on `document`, we let them run first
@@ -200,7 +192,7 @@ export async function injectScripts(data, info, isXml) {
     await injectAll('idle');
   }
   // release for GC
-  bridgeInfo = contLists = pageLists = VMInitInjection = null;
+  injectedInfo = contLists = pageLists = VMInitInjection = null;
 }
 
 function didPageLoseInjectability(toContent, scripts) {
@@ -218,7 +210,7 @@ function didPageLoseInjectability(toContent, scripts) {
   for (const scr of scripts) {
     const realm = scr[INJECT_INTO];
     if (realm === PAGE
-    || realm === AUTO && bridge[INJECT_INTO] !== CONTENT) {
+    || realm === AUTO && bridge.injectInto !== CONTENT) {
       if (toContent) safePush(toContent, [scr.id, scr.key.data]);
       else scr[INJECT_INTO] = CONTENT;
     }
@@ -261,7 +253,7 @@ function triageScript(script) {
     delete script[META_STR];
     if (pathMap) bridge.pathMaps[script.id] = pathMap;
   } else {
-    bridgeIds[script.id] = ID_BAD_REALM;
+    bridge.ids[script.id] = ID_BAD_REALM;
   }
   return realm;
 }
@@ -272,19 +264,15 @@ function inject(item, iframeCb) {
   const script = makeElem('script', !isCodeArray && code);
   // Firefox ignores sourceURL comment when a syntax error occurs so we'll print the name manually
   const onError = IS_FIREFOX && !iframeCb && (e => {
-    const { stack } = e.error;
+    const { stack } = e[ERROR];
     if (!stack || `${stack}`.includes(VM_UUID)) {
-      log('error', [item.displayName], e.error);
+      log(ERROR, [item.displayName + ':' + e.lineno + ':' + e.colno], e[ERROR]);
       e.preventDefault();
     }
   });
   const div = makeElem('div');
   // Hiding the script's code from mutation events like DOMNodeInserted or DOMNodeRemoved
-  const divRoot = injectedRoot || (
-    attachShadow
-      ? div::attachShadow({ mode: 'closed' })
-      : div
-  );
+  const divRoot = injectedRoot || div::attachShadow({ mode: 'closed' });
   if (isCodeArray) {
     safeApply(append, script, code);
   }
@@ -306,14 +294,14 @@ function inject(item, iframeCb) {
     divRoot::appendChild(script);
   }
   if (onError) {
-    window::on('error', onError);
+    window::on(ERROR, onError);
   }
   if (!injectedRoot) {
     // When using declarativeContent there's no documentElement so we'll append to `document`
     (elemByTag('*') || document)::appendChild(div);
   }
   if (onError) {
-    window::off('error', onError);
+    window::off(ERROR, onError);
   }
   if (iframeCb) {
     injectedRoot = divRoot;
@@ -331,6 +319,7 @@ function inject(item, iframeCb) {
   div::remove();
 }
 
+/** @param {VMScriptRunAt} runAt */
 function injectAll(runAt) {
   if (contLists && !invokeContent) {
     setupContentInvoker();
@@ -341,9 +330,13 @@ function injectAll(runAt) {
     const lists = inPage ? pageLists : contLists;
     const items = lists?.[runAt];
     if (items) {
-      bridge.post('ScriptData', { items, info: bridgeInfo[realm] }, realm);
-      bridgeInfo[realm] = false; // must be a sendable value to have own prop in the receiver
-      for (const { id } of items) tardyQueue[id] = 1;
+      bridge.post('ScriptData', { items, info: injectedInfo[realm] }, realm);
+      injectedInfo[realm] = false; // must be a sendable value to have own prop in the receiver
+      injectedRealms[realm] = true;
+      for (const { id, meta: { grant } } of items) {
+        tardyQueue[id] = 1;
+        if (!grant.length) bridge.grantless[realm] = 1;
+      }
       if (!inPage) nextTask()::then(() => tardyQueueCheck(items));
       else if (!IS_FIREFOX) res = injectPageList(runAt);
     }
@@ -370,11 +363,9 @@ async function injectPageList(runAt) {
 function setupContentInvoker() {
   invokeContent = VMInitInjection(IS_FIREFOX)(bridge.onHandle, logging);
   const postViaBridge = bridge.post;
+  // eslint-disable-next-line no-import-assign
   bridge.post = (cmd, params, realm, node) => {
-    const fn = realm === CONTENT
-      ? invokeContent
-      : postViaBridge;
-    fn(cmd, params, undefined, node);
+    (realm === CONTENT ? invokeContent : postViaBridge)(cmd, params, undefined, node);
   };
 }
 
@@ -385,16 +376,15 @@ function setupContentInvoker() {
 function tardyQueueCheck(scripts) {
   for (const { id } of scripts) {
     if (tardyQueue[id]) {
-      if (bridgeIds[id] === 1) bridgeIds[id] = ID_INJECTING;
+      if (bridge.ids[id] === 1) bridge.ids[id] = ID_INJECTING;
       delete tardyQueue[id];
     }
   }
 }
 
 function tellBridgeToWriteVault(vaultId, wnd) {
-  const { post } = bridge;
-  if (post) { // may be absent if this page doesn't have scripts
-    post('WriteVault', vaultId, PAGE, wnd);
+  if (bridge.post) { // may be absent if this page doesn't have scripts
+    bridge.post('WriteVault', vaultId, PAGE, wnd);
     return true;
   }
 }

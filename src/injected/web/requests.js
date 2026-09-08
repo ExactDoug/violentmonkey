@@ -1,18 +1,18 @@
-import bridge, { addHandlers } from './bridge';
+import * as bridge from './bridge';
+import { UPLOAD } from '../util';
 
 /** @type {Object<string,GMReq.Web>} */
 const idMap = createNullObj();
 const kContentTextHtml = 'text/html';
-const kResponse = 'response';
 const kResponseXML = 'responseXML';
 const kDocument = 'document';
 const kRaw = 'raw';
-const kOnerror = 'onerror';
-const kOnload = 'onload';
+const kOnerror = 'on' + ERROR;
+const LOAD = 'load';
 const EVENTS_TO_NOTIFY = [
   'abort',
-  'error',
-  'load',
+  ERROR,
+  LOAD,
   'loadend',
   'loadstart',
   'progress',
@@ -24,10 +24,12 @@ const OPTS_TO_KEEP = [
   kResponseType,
 ];
 const OPTS_TO_PASS = [
+  'conflictAction',
   'headers',
   'method',
   'overrideMimeType',
   'password',
+  'saveAs',
   'timeout',
   'user',
 ];
@@ -49,7 +51,7 @@ const XHR_TYPES = {
   '': 0,
 };
 
-addHandlers({
+bridge.addHandlers({
   /** @param {GMReq.Message.BG} msg */
   HttpRequested(msg) {
     const req = idMap[msg.id];
@@ -57,15 +59,18 @@ addHandlers({
       return;
     }
     const { type } = msg;
-    const cb = req.cb[type];
-    if (type === 'loadend') {
+    const upload = getOwnProp(msg, UPLOAD);
+    const cb = req.cb[upload ? 1 : 0][type];
+    if (!upload && type === 'loadend') {
       delete idMap[req.id];
     }
-    if (!cb) {
+    if (hasOwnProperty(msg, ERROR)) {
+      msg = msg[ERROR];
+      msg = new SafeError(msg[0], msg[1]);
+      if (cb) cb(msg); else log(ERROR, [bridge.displayNames[req.scriptId]], msg);
       return;
     }
-    if (hasOwnProperty(msg, 'error')) {
-      cb(new SafeError((/** @type {BGError} */msg).error));
+    if (!cb) {
       return;
     }
     const { data } = msg;
@@ -131,8 +136,13 @@ function parseRaw(req, msg, propName) {
       && propName === kResponseXML
       && PARSEABLE_TYPES::indexOf(ct = getContentType(msg) || kContentTextHtml) >= 0
     || responseType === 'json') {
-      try { res = ct ? new SafeDOMParser()::parseFromString(res, ct) : jsonParse(res); }
-      catch (e) { res = null; /* per specification */ }
+      try {
+        if (ct) {
+          bridge.call('ParseHTML', [res, ct], null, function () { res = this; });
+        } else {
+          res = jsonParse(res);
+        }
+      } catch (e) { res = null; /* per specification */ }
     }
     if (responseType === kDocument) {
       const otherPropName = propName === kResponse ? kResponseXML : kResponse;
@@ -164,7 +174,7 @@ function parseRaw(req, msg, propName) {
  * @return {VMScriptXHRControl | Promise<VMScriptXHRControl>}
  */
 export function onRequestCreate(opts, context, fileName) {
-  if (process.env.DEBUG) throwIfProtoPresent(opts);
+  if (__.DEBUG) throwIfProtoPresent(opts);
   let { data, url, [kResponseType]: type = '' } = opts;
   let err, res;
   // XHR spec requires `url` but allows ''/null/non-string
@@ -191,25 +201,43 @@ export function onRequestCreate(opts, context, fileName) {
   }
   const scriptId = context.id;
   const id = safeGetUniqId('VMxhr');
-  const cb = createNullObj();
+  const cb = [createNullObj(), createNullObj()];
+  const events = [createNullObj(), createNullObj()];
   const req = safePickInto({ cb, id, scriptId }, opts, OPTS_TO_KEEP);
   // withCredentials is for GM4 compatibility and used only if `anonymous` is not set,
   // it's true by default per the standard/historical behavior of gmxhr
-  const { withCredentials = true, anonymous = !withCredentials } = opts;
-  // setting opts.onload and onerror before EVENTS_TO_NOTIFY
-  if (context.async) res = new SafePromise((resolve, reject) => {
-    const { [kOnload]: onload, [kOnerror]: onerror } = opts;
-    opts[kOnload] = onload ? v => { resolve(v); onload(v); } : resolve;
-    opts[kOnerror] = onerror ? v => { reject(v); onerror(v); } : reject;
-  });
+  const {
+    withCredentials = true,
+    anonymous = !withCredentials,
+    [UPLOAD]: upload,
+  } = opts;
+  for (let i = 0, obj, key, val, passes = upload && isObject(upload) ? 2 : 1; i < passes; i++) {
+    obj = i ? nullObjFrom(upload) : opts;
+    for (key of EVENTS_TO_NOTIFY) {
+      if ((val = obj[`on${key}`]) && isFunction(val)) {
+        cb[i][key] = val;
+        events[i][key] = true;
+      }
+    }
+  }
+  if (context.async) {
+    const { resolve, reject } = res = SafePromiseWithResolvers();
+    const { [LOAD]: onload, [ERROR]: onerror } = cb[0];
+    cb[0][LOAD] = onload ? v => { resolve(v); onload(v); } : (events[0][LOAD] = true, resolve);
+    cb[0][ERROR] = onerror ? v => { reject(v); onerror(v); } : (events[0][ERROR] = true, reject);
+    res = res.promise;
+  } else {
+    res = {};
+  }
   idMap[id] = req;
   data = data == null && []
     // `binary` is for TM/GM-compatibility + non-objects = must use a string `data`
     || (opts.binary || !isObject(data)) && [`${data}`]
     // No browser can send FormData/URLSearchParams directly across worlds
     || getFormData(data)
-    // FF56+ can send any cloneable data directly, FF52-55 can't due to https://bugzil.la/1371246
-    || IS_FIREFOX >= 56 && [data]
+    // FF56+ can send any cloneable data directly
+    // TODO: add Chrome when "message_serialization" graduates from Canary into Stable
+    || IS_FIREFOX && [data]
     || [data, 'bin'];
   /** @type {GMReq.Message.Web} */
   bridge.call('HttpRequest', safePickInto({
@@ -221,10 +249,8 @@ export function onRequestCreate(opts, context, fileName) {
     [kFileName]: fileName,
     [kResponseType]: type,
     [kXhrType]: req[kXhrType] = XHR_TYPES[type] ? type : '',
-    events: EVENTS_TO_NOTIFY::filter(key => isFunction(cb[key] = opts[`on${key}`])),
-  }, opts, OPTS_TO_PASS));
-  if (!res) res = {};
-  else if (IS_FIREFOX) setPrototypeOf(res, SafePromiseConstructor);
+    events,
+  }, opts, OPTS_TO_PASS), null, null, /*cbAsync=*/true);
   setOwnProp(res, 'abort', () => bridge.post('AbortRequest', id));
   return res;
 }

@@ -1,8 +1,8 @@
-import { isCdnUrlRe, isDataUri, isRemote, makeRaw, request } from '@/common';
+import { isCdnUrlRe, isDataUri, isRemote, makeRaw } from '@/common';
 import { NO_CACHE } from '@/common/consts';
 import storage from './storage';
 import { getUpdateInterval } from './update';
-import { requestLimited } from './url';
+import { request, requestLimited } from './url';
 
 storage.cache.fetch = cacheOrFetch({
   init: options => ({ ...options, [kResponseType]: 'blob' }),
@@ -36,9 +36,7 @@ function cacheOrFetch(handlers = {}) {
       if (res) {
         const result = transform ? await transform(res, ...args) : res.data;
         await this.setOne(url, result);
-        if (options === 'res') {
-          return result;
-        }
+        return result;
       }
     } finally {
       delete requests[url];

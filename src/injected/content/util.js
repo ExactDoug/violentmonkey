@@ -17,7 +17,7 @@ const kTextContent = 'textContent';
 // required in FF to circumvent CSP style-src https://bugzil.la/1706787
 const setTextContent = describeProperty(Node[PROTO], kTextContent).set;
 const regexpTest = RegExp[PROTO].test; // Deeply unsafe. TODO: remove.
-const { createObjectURL } = URL;
+export const { createObjectURL } = URL;
 
 /**
  * @param {string} tag
@@ -53,15 +53,25 @@ export const makeElem = (tag, attrs) => {
   return el;
 };
 
-export const decodeResource = (raw, isBlob) => {
+export const makeSafeBlob = (data, type) => new SafeBlob([data], { __proto__: null, type });
+
+/**
+ * @param {string} raw
+ * @param {true | false | typeof Blob | typeof Uint8Array } [isBlob]
+ * @param {boolean} [isUserUrl]
+ * @return {string|Uint8Array|Blob|string}
+ */
+export const decodeResource = (raw, isBlob, isUserUrl) => {
   let res;
   const pos = raw::stringIndexOf(',');
-  const mimeType = pos < 0 ? '' : raw::slice(0, pos);
+  const mimeType = pos < 0 ? '' : raw::slice(isUserUrl ? 5/*data:*/ : 0, pos);
   const mimeData = pos < 0 ? raw : raw::slice(pos + 1);
   if (isBlob === false) {
     return `data:${mimeType};base64,${mimeData}`;
   }
-  res = safeAtob(mimeData);
+  res = !isUserUrl || mimeType::stringIndexOf('base64') >= 0
+    ? safeAtob(mimeData)
+    : mimeData;
   // TODO: do the check in BG and cache/store the result because safe-guarding all the stuff
   // regexp picks from an instance internally is inordinately complicated
   if (/[\x80-\xFF]/::regexpTest(res)) {
@@ -77,9 +87,11 @@ export const decodeResource = (raw, isBlob) => {
     }
     if (!isBlob) res = new SafeTextDecoder()::tdDecode(res);
   }
-  return isBlob
-    ? createObjectURL(new SafeBlob([res], { __proto__: null, type: mimeType }))
-    : res;
+  if (isBlob && isBlob !== SafeUint8Array) {
+    res = makeSafeBlob(res, mimeType);
+    if (isBlob !== SafeBlob) res = createObjectURL(res);
+  }
+  return res;
 };
 
 /**

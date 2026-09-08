@@ -33,12 +33,14 @@
            @keydown.up.exact="onUpDown">
         <a
           ref="$editAll"
-          class="edit-values-row flex"
-          @click="onEditAll" tabindex="0" v-text="i18n('editValueAllHint')"/>
+          class="edit-values-row"
+          :class="{ active: current?.isAll }"
+          @click="onEditAll" tabindex="0" v-text="i18n('editValueAllHint')" :data-num="keys.length"/>
         <div
           v-for="key in pageKeys"
           :key
           class="edit-values-row flex monospace-font"
+          :class="{ active: key === current?.keyOrig }"
           @keydown.delete.ctrl.exact="onRemove(key)"
           @click="onEdit(key)">
           <div class="ellipsis">
@@ -52,14 +54,15 @@
         </div>
       </div>
       <div class="edit-values-empty mt-1" v-if="!loading && !keys.length" v-text="i18n('noValues')"/>
-      <h3 v-text="i18n('headerRecycleBin')" v-if="trash"/>
+      <h3 v-text="i18n('headerRecycleBin')" v-if="trash" :data-num="Object.keys(trash).length"/>
       <div class="edit-values-table trash monospace-font"
            @keydown.down.exact="onUpDown"
            @keydown.up.exact="onUpDown"
            :style="trashKeyWidthStyle"
            v-if="trash">
         <!-- eslint-disable-next-line vue/no-unused-vars -->
-        <div v-for="({ key, cut, len }, trashKey) in trash" :key="trashKey"
+        <div v-for="({ key, cut, len, t }, trashKey) in trash" :key="trashKey"
+             :title="t"
              class="edit-values-row flex"
              @click="onRestore(trashKey)">
           <a class="ellipsis" v-text="key" tabindex="0"/>
@@ -68,41 +71,53 @@
         </div>
       </div>
     </div>
-    <div class="edit-values-panel flex flex-col flex-1 mb-1c" v-if="current">
+    <div class="edit-values-panel flex flex-col flex-1 mb-1c" v-if="current"
+         @keydown="onKeyDown"
+         @keydown.esc.exact.stop="onCancel">
       <div class="control">
         <h4 v-text="current.isAll ? i18n('labelEditValueAll') : i18n('labelEditValue')"/>
         <div class="flex center-items">
           <a tabindex="0" class="mr-1 flex" @click="editorValueShown = !editorValueShown">
             <Icon name="cog" :class="{ active: editorValueShown }"/>
           </a>
-          <button v-for="(text, idx) in [i18n('buttonOK'), i18n('buttonApply')]" :key="text"
-                  v-text="text" @click="onSave(idx)"
+          <button v-for="([text, fn, title], idx) in BUTTONS" :key="text"
+                  v-text="text" @click="fn"
                   :class="{'has-error': current.error, 'save-beacon': !idx}"
-                  :title="current.error"
+                  :title="[title.replace('Ctrl-', CTRL_META), current.error].filter(Boolean).join(' | ')"
                   :disabled="current.error || !current.dirty"/>
           <button v-text="i18n('buttonCancel')" @click="onCancel" title="Esc"/>
         </div>
       </div>
       <template v-if="editorValueShown">
         <p class="my-1" v-html="i18n('descEditorOptions')"/>
-        <setting-text name="valueEditor" json @dblclick="toggleBoolean" :has-save="false"/>
+        <setting-text :name="kValueEditor" json @dblclick="toggleBoolean" :has-save="false"/>
       </template>
       <label v-show="!current.isAll">
         <span v-text="i18n('valueLabelKey')"/>
-        <input type="text" v-model="current.key" :readOnly="!current.isNew || readOnly"
+        <input type="text" v-model="current.key" :readOnly
                ref="$key"
+               class="w-100 monospace-font"
                spellcheck="false"
-               @keydown="onKeyDownInKeyInput"
-               @keydown.esc.exact.stop="onCancel">
+               :class="{ dirty: (current.dirty = current.dirty & ~1 | (k = current.key !== current.keyOrig), k) }">
       </label>
-      <label>
-        <span v-text="current.isAll ? i18n('valueLabelValueAll') : i18n('valueLabelValue')"/>
+      <div>
+        <label v-if="current.isAll" v-text="i18n('valueLabelValueAll')" for="edit-value"/>
+        <label v-else-if="!current.isStr" v-text="i18n('valueLabelValue')" for="edit-value"/>
+        <locale-group v-else i18n-key="valueLabelValueOr" span @click="$value.cm.focus()">
+          <label :style="editAsString ? 'font-weight: bold' : null">
+            <locale-group i18n-key="valueLabelValueString">
+              <input type="checkbox" v-model="editAsString" style="margin: 0">
+            </locale-group>
+          </label>
+        </locale-group>
         <vm-code
           :value="current.value"
+          :reset="resetEditor"
           :cm-options="cmOptions"
           ref="$value"
           class="h-100 mt-1"
-          mode="application/json"
+          id="edit-value"
+          :mode="current.isStr ? 'text/plain' : 'application/json'"
           :readOnly
           @code-dirty="onChange"
           @keydown.tab.shift.exact.capture.stop
@@ -110,23 +125,27 @@
           :active="isActive"
           focusme
         />
-      </label>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, ref, watch } from 'vue';
-import { dumpScriptValue, formatByteLength, getBgPage, isEmpty, sendCmdDirectly } from '@/common';
+import { dumpScriptValue, formatByteLength, getBgPage, i18n, isEmpty, sendCmdDirectly } from '@/common';
 import { handleTabNavigation, keyboardService } from '@/common/keyboard';
 import { deepCopy, deepEqual, forEachEntry, mapEntry } from '@/common/object';
+import options from '@/common/options';
+import { kEditAsString, kValueEditor } from '@/common/options-defaults';
 import { WATCH_STORAGE } from '@/common/consts';
 import hookSetting from '@/common/hook-setting';
 import CodeMirror from 'codemirror';
 import Dropdown from 'vueleton/lib/dropdown';
 import VmCode from '@/common/ui/code';
 import Icon from '@/common/ui/icon';
+import LocaleGroup from '@/common/ui/locale-group';
 import { getActiveElement, showMessage } from '@/common/ui';
+import { CTRL_META } from '@/common/ui/util';
 import SettingText from '@/common/ui/setting-text';
 import { K_SAVE, kStorageSize, toggleBoolean } from '../../utils';
 
@@ -139,9 +158,17 @@ const $el = ref();
 const $editAll = ref();
 const $key = ref();
 const $value = ref();
+/** Ctrl-S in editor keeps it open, same behavior as "Apply" */
+const K_OK = 'Shift-Ctrl-S'; // using the order of modifiers in CM
+const BUTTONS = [
+  [i18n('buttonOK'), () => onSave(K_OK), K_OK],
+  [i18n('buttonApply'), onSave, K_SAVE],
+];
+const editAsString = ref();
 const editorValueShown = ref();
 const isActive = ref();
 const current = ref();
+const resetEditor = ref(0);
 const loading = ref(true);
 const page = ref();
 const values = ref();
@@ -153,17 +180,12 @@ const trashKeyWidthStyle = computed(() => (
 const PAGE_SIZE = 25;
 const MAX_LENGTH = 1024;
 const MAX_JSON_DURATION = 10; // ms
-const currentObservables = { error: '', dirty: false };
-const cutLength = s => (s.length > MAX_LENGTH ? s.slice(0, MAX_LENGTH) : s);
-const reparseJson = (str) => {
-  try {
-    // eslint-disable-next-line no-use-before-define
-    return JSON.stringify(JSON.parse(str), null, jsonIndent);
-  } catch (e) {
-    // This shouldn't happen but the storage may get corrupted or modified directly
-    return str;
-  }
+const currentObservables = {
+  error: '',
+  /** bitmask: key (set v|=1, clear v&=~1) value (set v|=2, clear v&=~2) */
+  dirty: 0,
 };
+const cutLength = s => (s.length > MAX_LENGTH ? s.slice(0, MAX_LENGTH) : s);
 /** Uses a negative tabId which is recognized in bg::values.js */
 const fakeSender = () => ({ tab: { id: Math.random() - 2 }, [kFrameId]: 0 });
 const conditionNotEdit = { condition: '!edit' };
@@ -189,7 +211,7 @@ let storageSentry;
 onActivated(() => {
   const root = $el.value;
   const { id } = props.script.props;
-  const bg = getBgPage();
+  const bg = !__.MV3 && getBgPage();
   root::addEventListener('focusin', onFocus);
   (current.value ? cm : focusedElement)?.focus();
   sendCmdDirectly('GetValueStore', id, undefined, sender = fakeSender()).then(data => {
@@ -203,8 +225,9 @@ onActivated(() => {
     () => root::removeEventListener('focusin', onFocus),
     keyboardService.register('pageup', () => flipPage(-1), conditionNotEdit),
     keyboardService.register('pagedown', () => flipPage(1), conditionNotEdit),
-    hookSetting('valueEditor', val => {
+    hookSetting(kValueEditor, val => {
       cmOptions = val;
+      editAsString.value = !!val?.[kEditAsString];
       jsonIndent = ' '.repeat(val?.tabSize || 2);
       if (cm && val) {
         for (const key in val) {
@@ -216,7 +239,7 @@ onActivated(() => {
   storageSentry = chrome.runtime.connect({
     name: WATCH_STORAGE + JSON.stringify({
       cfg: { value: id },
-      id: bg?.[WATCH_STORAGE](onStorageChanged),
+      id: bg && bg[WATCH_STORAGE](onStorageChanged),
       tabId: sender.tab.id,
     }),
   });
@@ -249,7 +272,14 @@ watch(current, (val, oldVal) => {
     focusedElement?.focus();
   }
 });
-
+watch(editAsString, val => {
+  const cur = current.value;
+  if (cur?.key) {
+    const str = cur.jsonValue;
+    cur.value = val ? str : JSON.stringify(str);
+  }
+  options.set(kValueEditor + '.' + kEditAsString, val);
+});
 watch(page, () => {
   focusedElement = null;
   autofocus();
@@ -268,12 +298,23 @@ function getLength(key, raw) {
   const len = key.length + (values.value[key] || raw).length - 1;
   return len < 10_000 ? len : formatByteLength(len);
 }
-function getValue(key, sliced, raw) {
-  let value = values.value[key] || raw;
+function getValue(key, sliced, jsonValue) {
+  let value = values.value[key];
   const type = value[0];
   value = value.slice(1);
-  if (type === 's') value = JSON.stringify(value);
-  else if (!sliced) value = reparseJson(value);
+  if (type === 's') {
+    if (!jsonValue || (jsonValue[0] = value, !editAsString.value)) {
+      value = JSON.stringify(value);
+    }
+  } else if (!sliced) {
+    try {
+      value = JSON.parse(value);
+      jsonValue?.push(value);
+      value = JSON.stringify(value, null, jsonIndent);
+    } catch (e) {
+      // This shouldn't happen but the storage may get corrupted or modified directly
+    }
+  }
   return sliced ? cutLength(value) : value;
 }
 function getValueAll() {
@@ -320,21 +361,34 @@ function updateKeyWidthStyle(items, propName) {
   for (const item of items) max = Math.max(max, (propName ? item[propName] : item).length);
   return { '--keyW': `${max}ch` };
 }
-async function updateValue({
-  key,
-  jsonValue,
-  rawValue = dumpScriptValue(jsonValue) || '',
-}, isSave) {
-  if (isSave && keys.value.includes(key)) {
-    addToTrash(key);
-  }
+async function updateValue(data, isSave) {
+  const {
+    key,
+    keyOrig,
+    jsonValue,
+    rawValue = dumpScriptValue(jsonValue) || '',
+  } = data;
   const { id } = props.script.props;
-  await sendCmdDirectly('UpdateValue', { [id]: { [key]: rawValue } }, undefined, sender);
-  if (rawValue) {
-    values.value[key] = rawValue;
-  } else {
-    delete values.value[key];
+  const valuesObj = values.value;
+  const upd = { [key]: rawValue };
+  const renamed = keyOrig != null && key !== keyOrig;
+  if (isSave) {
+    data.keyOrig = key;
+    if (key in valuesObj) addToTrash(key);
+    if (renamed && keyOrig in valuesObj) addToTrash(keyOrig);
+    if (!data.isStr && editAsString.value && typeof jsonValue === 'string') {
+      data.isStr = true;
+      data.value = jsonValue;
+      if (!jsonValue) resetEditor.value++; // forcing because the old editor `value` is also ''
+    }
   }
+  if (rawValue) valuesObj[key] = rawValue;
+  else delete valuesObj[key];
+  if (renamed) {
+    delete valuesObj[keyOrig];
+    upd[keyOrig] = null;
+  }
+  await sendCmdDirectly('UpdateValue', { [id]: upd }, undefined, sender);
   calcSize();
 }
 
@@ -343,8 +397,9 @@ function onNew() {
     isNew: true,
     key: '',
     value: '',
-    ...currentObservables,
   };
+  resetEditor.value++; // clearing any unsaved text in the editor with `value` of ''
+  onChange(false, ''); // set the error text for empty JSON
 }
 function addToTrash(
   key,
@@ -357,12 +412,13 @@ function addToTrash(
     rawValue,
     cut,
     len,
+    t: new Date().toLocaleTimeString(),
   };
 }
 function onRemove(key) {
   if (props.readOnly) return;
-  updateValue({ key });
   addToTrash(key);
+  updateValue({ key });
   if (current.value?.key === key) {
     current.value = null;
   }
@@ -375,9 +431,16 @@ function onRestore(trashKey) {
   updateValue(entry);
 }
 function onEdit(key) {
+  onCancel();
+  const parsed = [];
+  const value = getValue(key, false, parsed);
+  const [jsonValue] = parsed;
   current.value = {
+    keyOrig: key,
     key,
-    value: getValue(key),
+    value,
+    jsonValue,
+    isStr: typeof jsonValue === 'string',
     ...currentObservables,
   };
 }
@@ -388,7 +451,8 @@ function onEditAll() {
     ...currentObservables,
   };
 }
-async function onSave(buttonIndex) {
+/** @param {Event | string} arg */
+async function onSave(arg) {
   const cur = current.value;
   if (cur.jsonPaused) {
     cur.jsonPaused = false;
@@ -401,9 +465,10 @@ async function onSave(buttonIndex) {
     showMessage({ text: cur.error });
     return;
   }
-  if (buttonIndex === 1) {
+  if (arg !== K_OK) {
     cm.markClean();
-    cur.dirty = false;
+    cur.dirty = 0;
+    cur.isNew = false;
   } else {
     current.value = null;
   }
@@ -419,23 +484,22 @@ async function onSave(buttonIndex) {
 }
 function onCancel() {
   const cur = current.value;
-  if (cur.dirty) {
+  if (cur?.dirty) {
     const str = cm.getValue().trim();
     const {jsonValue = str} = cur;
     addToTrash(cur.key, dumpScriptValue(jsonValue), cutLength(str));
   }
-  current.value = null;
+  if (cur) current.value = null;
 }
-function onChange(isChanged) {
+function onChange(isChanged, str = cm.getValue()) {
   const cur = current.value;
-  cur.dirty = isChanged;
+  cur.dirty = cur.dirty & ~2 | 2 * isChanged;
   cur.error = null;
   const t0 = performance.now();
-  const str = cm.getValue().trim();
   try {
-    if (cur.isAll && str[0] !== '{') throw 'Expected { at position 0';
+    if (cur.isAll && !/^\s*{/.test(str)) throw 'Expected { at position 0';
     if (cur.jsonPaused) return;
-    cur.jsonValue = JSON.parse(str);
+    cur.jsonValue = cur.isStr && editAsString.value ? str : JSON.parse(str);
   } catch (e) {
     const re = /(position\s+)(\d+)|$/;
     const pos = cm.posFromIndex(+`${e}`.match(re)[2] || 0);
@@ -445,9 +509,10 @@ function onChange(isChanged) {
   }
   cur.jsonPaused = performance.now() - t0 > MAX_JSON_DURATION;
 }
-function onKeyDownInKeyInput(evt) {
-  if (CodeMirror.keyName(evt) === K_SAVE) {
-    onSave();
+function onKeyDown(evt) {
+  const key = CodeMirror.keyName(evt);
+  if (key === K_SAVE || key === K_OK) {
+    onSave(key);
   }
 }
 function onStorageChanged(changes) {
@@ -458,11 +523,11 @@ function onStorageChanged(changes) {
     const valueGetter = cur && (cur.isAll ? getValueAll : getValue);
     setData(data instanceof Object ? data : deepCopy(data));
     if (cur) {
-      const newText = valueGetter(currentKey);
+      const newText = valueGetter(currentKey, false, []);
       const curText = cm.getValue();
       if (curText === newText) {
         cur.isNew = false;
-        cur.dirty = false;
+        cur.dirty &= ~2;
       } else if (!cur.dirty) {
         // Updating the current value only if it wasn't yet changed by the user.
         // Keeping the same current.value to avoid triggering `watch` observer
@@ -487,17 +552,29 @@ $lightBorder: 1px solid var(--fill-2);
 .edit-values {
   gap: 1em;
   overflow: hidden;
+  .trash {
+    transition: opacity 0s .1s;
+    &:not(:hover) {
+      opacity: .5;
+    }
+  }
   @media (max-width: 1200px) {
+    &-panel {
+      flex: 1 1 100%;
+    }
     &[data-editing] {
       flex-direction: column;
       > :first-child {
-        flex: 0 1 min-content;
+        flex: 0 0 min-content;
         overflow-y: auto;
         max-height: 40vh;
         @media (max-height: 600px) {
           display: none;
         }
       }
+    }
+    .trash {
+      flex-shrink: 1000;
     }
   }
   nav {
@@ -521,8 +598,15 @@ $lightBorder: 1px solid var(--fill-2);
   &-row {
     border: $lightBorder;
     cursor: pointer;
+    &.active {
+      a&, > div:first-child {
+        background-color: hsla(210, 100%, 50%, .1);
+        font-weight: bold;
+      }
+    }
     .main > &:first-child {
       padding: 8px 6px;
+      display: block;
     }
     &:not(:first-child) {
       border-top: 0;
@@ -579,10 +663,7 @@ $lightBorder: 1px solid var(--fill-2);
         width: 0;
       }
     }
-    input {
-      width: 100%;
-    }
-    label {
+    > :not(.control) {
       display: flex;
       flex-direction: column;
       &:last-child {
@@ -592,6 +673,7 @@ $lightBorder: 1px solid var(--fill-2);
       > input {
         margin: .25em 0;
         padding: .25em;
+        font-weight: bold;
       }
     }
   }
@@ -604,6 +686,9 @@ $lightBorder: 1px solid var(--fill-2);
   }
   .icon:not(.active) {
     fill: var(--fg);
+  }
+  input.dirty {
+    font-style: italic;
   }
 }
 </style>

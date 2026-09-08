@@ -1,6 +1,7 @@
-import { escapeStringForRegExp, normalizeTag } from '@/common';
+import { ESC_STR_RE, kTag } from '@/common/consts';
 
-const reToken = re`/\s*
+const reToken = regex({ disable: { n: true }, flags: 'y' })`
+  \s*
   (!)?
   (
     \# |
@@ -14,7 +15,7 @@ const reToken = re`/\s*
     \S+
   )
   (?:\s+|$)
-/yx`;
+`;
 const reTwoSingleQuotes = /''/g;
 const reTwoDoubleQuotes = /""/g;
 
@@ -49,7 +50,6 @@ export function createSearchRules(search) {
       parsed: str,
     });
     if (prefix === '#') {
-      str = normalizeTag(str).replace(/\./g, '\\.');
       if (str) (negative ? excludeTags : includeTags).push(str);
     } else {
       if (re1 || re2) {
@@ -58,7 +58,7 @@ export function createSearchRules(search) {
         str = reStr;
       } else {
         if (!quoted) flags = 'i';
-        str = escapeStringForRegExp(str);
+        str = str.replace(ESC_STR_RE, '\\$&');
       }
       /** @namespace VMSearchRule */
       rules.push({
@@ -71,8 +71,9 @@ export function createSearchRules(search) {
   [includeTags, excludeTags].forEach((tags, negative) => {
     if (tags.length) {
       rules.unshift({
-        scope: 'tags',
-        re: new RegExp(`(?:^|\\s)(${tags.join('|').toLowerCase()})(\\s|$)`, 'u'),
+        scope: kTag,
+        // searching anywhere in a tag to enable incremental search
+        re: RegExp(tags.join('\n').replace(ESC_STR_RE, '\\$&').replace(/\n/g, '|'), 'i'),
         negative: !!negative,
       });
     }
@@ -81,24 +82,4 @@ export function createSearchRules(search) {
     tokens,
     rules,
   };
-}
-
-/**
- * @this {Object} $cache, see initScript()
- * @param {VMSearchRule} rule
- * @return {number}
- */
-export function testSearchRule({ re, negative, scope }) {
-  return negative ^ (
-    re.test(this[scope || 'desc'])
-    || !scope && re.test(this.code)
-  );
-}
-
-export function performSearch(scripts, rules) {
-  let res = 0;
-  for (const { $cache } of scripts) {
-    res += ($cache.show = rules.every(testSearchRule, $cache));
-  }
-  return res;
 }
