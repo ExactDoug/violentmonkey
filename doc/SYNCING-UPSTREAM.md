@@ -20,11 +20,32 @@ The complete fork delta against upstream is:
 | `doc/SYNCING-UPSTREAM.md` | new | This file |
 | `.gitattributes` | new | Forces LF; prevents the CRLF phantom-diff failure |
 | `src/resources/icon{,-beta}.{png,svg}` | replaced | Exact logo |
-| `gulpfile.js` | 4 lines | Wires `rebrand` into `dev` / `build` / `watch` |
+| `src/resources/icon-small.png` | new | Square monogram for sizes < 128px (see below) |
+| `gulpfile.js` | ~30 lines | Wires `rebrand` into `dev`/`build`/`watch`; small-icon source in `createIcons` |
 | `.gitignore` | 2 lines | `.worktrees/`, `/dev-resources/` |
 
 That is the whole fork. If this table grows, push back — a new entry is a new
 conflict every sync, and branding almost never needs one.
+
+`gulpfile.js` is the only upstream file we patch with real logic, so it is the
+one place a sync can genuinely conflict. Both patches are small and localized:
+a two-line `rebrand` wiring, and a `createIcons` that picks its source image
+based on size. If upstream rewrites `createIcons`, take theirs and re-apply the
+`brand.iconSmall` branch on top.
+
+## Icons
+
+`src/resources/icon.png` is the full Exact wordmark. It is legible at 128px and
+nowhere near it below that, so `createIcons` renders every smaller size from
+`src/resources/icon-small.png` — the red checkmark from the logo, extracted and
+squared. Set `brand.iconSmall` to `null` to fall back to upstream's behaviour of
+deriving all sizes from a single image.
+
+Regenerating the monogram is a manual step; it was cut from the wordmark once and
+committed. If the brand artwork changes, re-cut it as a square, transparent PNG
+that fills ~96% of its canvas (looser framing thins the stroke to near-invisible
+at 16px) and check the result at true size, including the grayscale `b` variants
+— `browser_action` uses those, not the colour ones.
 
 ## Doing a sync
 
